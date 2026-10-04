@@ -23,29 +23,34 @@ export function buildOverpassQuery({ mode = 'around', lat, lon, radiusM = 8000, 
   const cats = (categoryIds?.length ? categoryIds : CATEGORIES.filter((c) => c.defaultOn).map((c) => c.id))
     .map((id) => CATEGORY_BY_ID[id]).filter(Boolean);
   if (!cats.length) throw new Error('Выбери хотя бы одну категорию');
+  const selectors = cats.flatMap((cat) => cat.selectors);
 
-  let header = '';
-  let scope;
   if (mode === 'state') {
     if (!STATE_BY_CODE[stateCode]) throw new Error('Выбери штат');
-    header = `area["ISO3166-2"="US-${stateCode}"]["admin_level"="4"]->.st;\n`;
-    scope = '(area.st)';
-  } else {
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error('Выбери город');
-    scope = `(around:${Math.round(radiusM)},${lat.toFixed(5)},${lon.toFixed(5)})`;
+    // Whole state: one index lookup for places that have contacts, then cheap in-memory category
+    // filters. Scanning every category across a whole state times out on public Overpass servers.
+    const keys = contacts === 'website'
+      ? ['email', 'contact:email', 'website', 'contact:website']
+      : ['email', 'contact:email'];
+    return `[out:json][timeout:170][maxsize:536870912];
+area["ISO3166-2"="US-${stateCode}"]["admin_level"="4"]->.st;
+(
+${keys.map((k) => `  nwr["${k}"]["name"](area.st);`).join('\n')}
+)->.c;
+(
+${selectors.map(([key, re]) => `  nwr.c["${key}"~"${re}"];`).join('\n')}
+);
+out center ${limit};`;
   }
 
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error('Выбери город');
+  const scope = `(around:${Math.round(radiusM)},${lat.toFixed(5)},${lon.toFixed(5)})`;
   const contactFilters = CONTACT_FILTERS[contacts] || CONTACT_FILTERS.any;
   const lines = [];
-  for (const cat of cats) {
-    for (const [key, re] of cat.selectors) {
-      for (const cf of contactFilters) {
-        lines.push(`  nwr["${key}"~"${re}"]["name"]${cf}${scope};`);
-      }
-    }
+  for (const [key, re] of selectors) {
+    for (const cf of contactFilters) lines.push(`  nwr["${key}"~"${re}"]["name"]${cf}${scope};`);
   }
-  const timeout = mode === 'state' ? 120 : 60;
-  return `[out:json][timeout:${timeout}];\n${header}(\n${lines.join('\n')}\n);\nout center ${limit};`;
+  return `[out:json][timeout:60];\n(\n${lines.join('\n')}\n);\nout center ${limit};`;
 }
 
 export function classify(tags) {
@@ -158,42 +163,51 @@ export function sortLeads(leads, by = 'contacts') {
 
 async function fetchWithTimeout(url, opts = {}, ms = 90000) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, ms);
   const outer = opts.signal;
   if (outer) outer.addEventListener('abort', () => ctrl.abort(), { once: true });
   try {
     return await fetch(url, { ...opts, signal: ctrl.signal });
+  } catch (e) {
+    if (timedOut) throw new Error(`не успел ответить за ${Math.round(ms / 1000)} сек`);
+    throw e;
   } finally {
     clearTimeout(timer);
   }
 }
 
-/** Runs an Overpass query via our server (if any) or directly against public mirrors. */
-export async function runOverpass(query, { apiBase = null, signal, onAttempt } = {}) {
-  const targets = apiBase ? [`${apiBase}api/overpass`, ...OVERPASS_ENDPOINTS] : OVERPASS_ENDPOINTS;
+/**
+ * Runs an Overpass query via our server (if any) or directly against public mirrors.
+ * endpoints/perTryMs/maxTries let heavy queries skip the server (60 s limit on Vercel) and fail fast.
+ */
+export async function runOverpass(query, {
+  apiBase = null, signal, onAttempt, endpoints = OVERPASS_ENDPOINTS, perTryMs = 90000, maxTries = Infinity,
+} = {}) {
+  const targets = (apiBase ? [`${apiBase}api/overpass`, ...endpoints] : endpoints).slice(0, maxTries);
   let lastErr;
-  for (const url of targets) {
+  for (const [i, url] of targets.entries()) {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-    onAttempt?.(url);
+    onAttempt?.(url, i + 1, targets.length);
     try {
       const res = await fetchWithTimeout(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
         body: `data=${encodeURIComponent(query)}`,
         signal,
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      }, perTryMs);
+      if (!res.ok) throw new Error(res.status === 429 ? 'сервер перегружен (429)' : res.status === 504 ? 'сервер не успел (504)' : `HTTP ${res.status}`);
       const json = await res.json();
       if (json.remark && /runtime error|timed out|out of memory/i.test(json.remark) && !json.elements?.length) {
-        throw new Error(json.remark);
+        throw new Error('запрос слишком большой для сервера');
       }
       return json;
     } catch (e) {
-      if (e.name === 'AbortError' && signal?.aborted) throw e;
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
       lastErr = e;
     }
   }
-  throw new Error(`OpenStreetMap не ответил (${lastErr?.message || 'ошибка сети'}). Попробуй ещё раз через минуту или уменьши радиус.`);
+  throw new Error(`OpenStreetMap не ответил: ${lastErr?.message || 'ошибка сети'}.`);
 }
 
 /** Google Places search through our server (needs GOOGLE_MAPS_API_KEY on the server). */

@@ -3,7 +3,7 @@ import {
 } from './data.js';
 import {
   buildOverpassQuery, geocodeCity, parseOverpass, runOverpass, searchGooglePlaces, sortLeads, suggestCities,
-  buildCityListQuery, parseCityList, matchCities,
+  buildCityListQuery, parseCityList, matchCities, OVERPASS_ENDPOINTS,
   assessFit, haversineKm,
 } from './search.js';
 import {
@@ -431,6 +431,9 @@ function syncMode() {
   const mode = $('input[name="mode"]:checked').value;
   $('#cityField').hidden = mode === 'state';
   $('#radiusField').hidden = mode === 'state';
+  const anyOpt = $('#contactsSelect option[value="any"]');
+  anyOpt.disabled = mode === 'state';
+  anyOpt.textContent = mode === 'state' ? 'Все заведения (только для города)' : 'Все заведения';
   if (mode === 'state' && $('#contactsSelect').value === 'any') $('#contactsSelect').value = 'email';
 }
 
@@ -493,6 +496,17 @@ async function doSearch() {
   state.searchAbort = ctrl;
   $('#searchBtn').disabled = true;
   setStatus('<span class="spinner"></span> Ищу…');
+  // Don't leave the previous search on screen while a new one runs.
+  state.results = [];
+  state.selected.clear();
+  renderResults(true);
+  const started = Date.now();
+  let phase = 'Ищу…';
+  const tick = setInterval(() => {
+    const sec = Math.round((Date.now() - started) / 1000);
+    setStatus(`<span class="spinner"></span> ${phase} <b>${sec} сек</b> <button type="button" class="btn sm ghost" id="cancelSearch">Отменить</button>`);
+    $('#cancelSearch')?.addEventListener('click', () => ctrl.abort(), { once: true });
+  }, 1000);
 
   try {
     if (mode === 'around' && !state.city) {
@@ -514,12 +528,24 @@ async function doSearch() {
     let leads = [];
 
     if (source === 'osm' || source === 'both') {
-      setStatus('<span class="spinner"></span> Запрашиваю OpenStreetMap… (до 1 минуты, для штата дольше)');
+      phase = mode === 'state'
+        ? `Ищу по всему штату ${STATE_BY_CODE[st].name} (обычно 20–90 сек)…`
+        : 'Запрашиваю OpenStreetMap…';
       const q = buildOverpassQuery({
         mode, lat: city?.lat, lon: city?.lon, radiusM: radiusKm * 1000, stateCode: st, categoryIds, contacts,
-        limit: mode === 'state' ? 600 : 400,
+        limit: mode === 'state' ? 800 : 400,
       });
-      const json = await runOverpass(q, { apiBase: state.server.ok ? state.server.base : null, signal: ctrl.signal });
+      // Whole-state queries can take longer than the 60 s server limit on Vercel: go to the public
+      // mirrors directly, best-performing mirror first, at most two tries.
+      const json = mode === 'state'
+        ? await runOverpass(q, {
+          signal: ctrl.signal,
+          endpoints: [OVERPASS_ENDPOINTS[1], OVERPASS_ENDPOINTS[0]],
+          perTryMs: 150000,
+          maxTries: 2,
+          onAttempt: (url, n) => { if (n > 1) phase = `Первый сервер не ответил, пробую второй (${new URL(url).hostname})…`; },
+        })
+        : await runOverpass(q, { apiBase: state.server.ok ? state.server.base : null, signal: ctrl.signal, perTryMs: 75000 });
       leads = parseOverpass(json, ctx);
     }
 
@@ -565,9 +591,15 @@ async function doSearch() {
       if (window.matchMedia('(max-width: 980px)').matches) $('#map').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   } catch (e) {
-    if (e.name === 'AbortError') return;
-    setStatus(esc(e.message || String(e)), 'error');
+    clearInterval(tick);
+    if (state.searchAbort !== ctrl) return; // a newer search replaced this one
+    if (e.name === 'AbortError') { setStatus('Поиск отменён.', 'warn'); return; }
+    const tip = mode === 'state'
+      ? ' Сервера OpenStreetMap сейчас перегружены. Попробуй через пару минут, отметь меньше категорий или ищи по городам («Город + радиус», радиус до 40 км). Это быстрее и находит больше мест.'
+      : ' Попробуй ещё раз через минуту или уменьши радиус.';
+    setStatus(esc((e.message || String(e)) + tip), 'error');
   } finally {
+    clearInterval(tick);
     if (state.searchAbort === ctrl) $('#searchBtn').disabled = false;
   }
 }

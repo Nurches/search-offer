@@ -226,6 +226,21 @@ try {
   assert.match(await page.textContent('#pmInfo'), /Жильё рядом с работой/);
   await page.click('#placeModal [data-close]');
 
+  // Whole-state search: goes straight to public mirrors (first one down → second one answers),
+  // clears old results while running, "all places" is not offered for a whole state
+  await page.route('https://overpass.kumi.systems/**', (r) => r.abort('connectionrefused'));
+  await page.click('label:has(input[name="mode"][value="state"])');
+  assert.equal(await page.evaluate(() => document.querySelector('#contactsSelect option[value="any"]').disabled), true);
+  assert.equal(await page.inputValue('#contactsSelect'), 'email');
+  await page.selectOption('#stateSelect', 'NJ');
+  let stateQuery = '';
+  page.on('request', (rq) => { if (rq.url().startsWith('https://overpass-api.de/')) stateQuery = decodeURIComponent(rq.postData() || ''); });
+  await page.click('#searchBtn');
+  await page.waitForFunction(() => document.querySelectorAll('.lead').length > 0 && !document.querySelector('#searchBtn').disabled);
+  assert.match(stateQuery, /area\["ISO3166-2"="US-NJ"\]/);
+  assert.match(stateQuery, /->\.c;/);
+  await page.click('label:has(input[name="mode"][value="around"])');
+
   // ---- one-click Gmail campaign + reply tracking (Google sign-in and Gmail API mocked) ----
   {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });

@@ -17,8 +17,11 @@ test('around query includes categories, radius and name filter', () => {
 test('state query uses ISO area and contact filters', () => {
   const q = buildOverpassQuery({ mode: 'state', stateCode: 'ME', categoryIds: ['lodging'], contacts: 'email', limit: 600 });
   assert.match(q, /area\["ISO3166-2"="US-ME"\]\["admin_level"="4"\]->\.st;/);
-  assert.match(q, /\["email"\]\(area\.st\);/);
-  assert.match(q, /\["contact:email"\]\(area\.st\);/);
+  assert.match(q, /nwr\["email"\]\["name"\]\(area\.st\);/);
+  assert.match(q, /nwr\["contact:email"\]\["name"\]\(area\.st\);\n\)->\.c;/);
+  assert.match(q, /nwr\.c\["tourism"~"\^\(hotel\|motel\|resort\|hostel\|guest_house\|apartment\)\$"\];/);
+  assert.doesNotMatch(q, /website/);
+  assert.match(buildOverpassQuery({ mode: "state", stateCode: "ME", categoryIds: ["lodging"], contacts: "website" }), /nwr\["contact:website"\]\["name"\]\(area\.st\);/);
   assert.match(q, /out center 600;/);
 });
 
