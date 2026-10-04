@@ -117,3 +117,43 @@ test('data integrity', () => {
   assert.equal(Object.keys(STATE_BY_CODE).length, 51);
   for (const c of CATEGORIES) for (const [, re] of c.selectors) new RegExp(re);
 });
+
+test('pair mode: "we" templates, both names and contacts, partner CC', async () => {
+  const { DEFAULT_TEMPLATES_PAIR, partnerCc, mailtoUrl } = await import('../../public/js/outreach.js');
+  const profile = {
+    searchMode: 'pair', name: 'Student One', partnerName: 'Student Two', university: 'Test University',
+    phone: '+7 700 000 0001', email: 'one@example.org', partnerEmail: 'two@example.org', resumeLink: 'https://drive.google.com/joint',
+  };
+  const lead = { name: 'Sea Hotel', category: 'lodging', city: 'Ocean City', state: 'MD' };
+  const { subject, body } = composeEmail(DEFAULT_TEMPLATES_PAIR, 'cold', profile, lead);
+  assert.match(subject, /Two J-1/);
+  assert.match(body, /together with my friend Student Two we are both students at Test University/);
+  assert.match(body, /Upper-Intermediate \(B2\) \(both\)/);
+  assert.match(body, /we both have experience/);
+  assert.match(body, /job offer for each of us/);
+  assert.match(body, /Student One and Student Two\nStudent One: \+7 700 000 0001, one@example\.org\nStudent Two: two@example\.org$/);
+  assert.doesNotMatch(body, /\{\{/);
+  const diff = composeEmail(DEFAULT_TEMPLATES_PAIR, 'cold', { ...profile, partnerUniversity: 'Other Uni', partnerEnglish: 'B1' }, lead).body;
+  assert.match(diff, /students at Test University and Other Uni/);
+  assert.match(diff, /Student One – Upper-Intermediate \(B2\), Student Two – B1/);
+  assert.equal(partnerCc(profile), 'two@example.org');
+  assert.equal(partnerCc({ ...profile, ccPartner: 'no' }), '');
+  assert.equal(partnerCc({ ...profile, searchMode: 'solo' }), '');
+  assert.equal(new URL(gmailComposeUrl({ to: 'a@b.com', cc: 'two@example.org' })).searchParams.get('cc'), 'two@example.org');
+  assert.match(mailtoUrl({ to: 'a@b.com', cc: 'c@d.com' }), /\?cc=c%40d\.com&subject=/);
+  // solo templates untouched
+  assert.match(composeEmail(DEFAULT_TEMPLATES, 'cold', { ...profile, searchMode: 'solo' }, lead).body, /^Dear Sea Hotel Hiring Team,\n\nMy name is Student One, and I am/);
+});
+
+test('merging a friend\'s backup keeps the furthest status and all history', async () => {
+  const { mergeLeads } = await import('../../public/js/store.js');
+  const mine = { id: 'osm:node/1', name: 'Sea Hotel', status: 'emailed', emails: ['a@x.com'], notes: 'my note', history: [{ at: '2026-10-05T10:00:00Z', action: 'cold' }], lastContactAt: '2026-10-05T10:00:00Z', addedAt: '2026-10-04T00:00:00Z' };
+  const hers = { id: 'osm:node/1', name: 'Sea Hotel', status: 'replied', emails: ['hr@x.com'], notes: 'manager Kate', history: [{ at: '2026-10-05T10:00:00Z', action: 'cold' }, { at: '2026-10-08T09:00:00Z', action: 'status:replied' }], lastContactAt: '2026-10-05T10:00:00Z', addedAt: '2026-10-03T00:00:00Z' };
+  const m = mergeLeads(mine, hers);
+  assert.equal(m.status, 'replied');
+  assert.deepEqual(m.emails, ['a@x.com', 'hr@x.com']);
+  assert.equal(m.history.length, 2);
+  assert.equal(m.notes, 'my note | manager Kate');
+  assert.equal(m.addedAt, '2026-10-03T00:00:00Z');
+  assert.equal(mergeLeads(hers, mine).status, 'replied');
+});

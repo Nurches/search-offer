@@ -4,10 +4,10 @@ import {
   assessFit, haversineKm,
 } from './search.js';
 import {
-  DEFAULT_PROFILE, DEFAULT_TEMPLATES, STATUSES, STATUS_BY_ID, composeEmail, emailSearchUrl, gmailComposeUrl,
+  DEFAULT_PROFILE, DEFAULT_TEMPLATES, DEFAULT_TEMPLATES_PAIR, defaultTemplatesFor, partnerCc, SOLO_EXPERIENCE, PAIR_EXPERIENCE, STATUSES, STATUS_BY_ID, composeEmail, emailSearchUrl, gmailComposeUrl,
   googleMapsEmbedUrl, googleMapsSearchUrl, googleMapsUrl, jobBoardLinks, mailtoUrl,
 } from './outreach.js';
-import { KEYS, download, leadsToCsv, load, save, toSavedLead } from './store.js';
+import { KEYS, download, leadsToCsv, load, mergeLeads as mergeSavedLeads, save, toSavedLead } from './store.js';
 
 // ---------- helpers ----------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -33,7 +33,10 @@ function hostOf(url) {
 const state = {
   settings: load(KEYS.settings, { apiBase: '' }),
   profile: { ...DEFAULT_PROFILE, ...load(KEYS.profile, {}) },
-  templates: { ...structuredClone(DEFAULT_TEMPLATES), ...load(KEYS.templates, {}) },
+  tpl: {
+    solo: { ...structuredClone(DEFAULT_TEMPLATES), ...load(KEYS.templates, {}) },
+    pair: { ...structuredClone(DEFAULT_TEMPLATES_PAIR), ...load(KEYS.templatesPair, {}) },
+  },
   saved: new Map(load(KEYS.leads, []).map((l) => [l.id, l])),
   results: [],
   selected: new Set(),
@@ -42,6 +45,10 @@ const state = {
   searchAbort: null,
   lastCtx: null,
 };
+
+const mode = () => (state.profile.searchMode === 'pair' ? 'pair' : 'solo');
+const tpls = () => state.tpl[mode()];
+const saveTemplates = () => save(mode() === 'pair' ? KEYS.templatesPair : KEYS.templates, tpls());
 
 function persistLeads() {
   save(KEYS.leads, [...state.saved.values()]);
@@ -106,6 +113,91 @@ function initMap() {
   }).addTo(map);
   markerLayer = L.layerGroup().addTo(map);
   centerLayer = L.layerGroup().addTo(map);
+
+  // Fullscreen toggle
+  const FullCtl = L.Control.extend({
+    options: { position: 'topright' },
+    onAdd() {
+      const box = L.DomUtil.create('div', 'leaflet-bar map-ctl');
+      box.innerHTML = '<a href="#" role="button" id="mapFullBtn" title="Карта на весь экран" aria-label="Карта на весь экран">⛶</a>';
+      L.DomEvent.disableClickPropagation(box);
+      L.DomEvent.on(box.firstChild, 'click', (e) => { L.DomEvent.preventDefault(e); toggleMapFull(); });
+      return box;
+    },
+  });
+  new FullCtl().addTo(map);
+
+  // Legend
+  const Legend = L.Control.extend({
+    options: { position: 'bottomleft' },
+    onAdd() {
+      const box = L.DomUtil.create('div', 'map-legend');
+      box.innerHTML = `<span><i style="background:${FIT_COLOR.ok}"></i>подходит</span>
+        <span><i style="background:${FIT_COLOR.check}"></i>уточнить</span>
+        <span><i style="background:${FIT_COLOR.bad}"></i>нельзя</span>
+        <span><i class="big"></i>есть email</span>`;
+      return box;
+    },
+  });
+  new Legend().addTo(map);
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && $('#map').classList.contains('map-full') && !document.querySelector('dialog[open]')) toggleMapFull(false);
+  });
+
+  // Popup buttons
+  map.on('popupopen', (e) => {
+    const el = e.popup.getElement();
+    el.querySelectorAll('[data-pop]').forEach((b) => b.addEventListener('click', () => {
+      const lead = state.results.find((l) => l.id === b.dataset.id);
+      if (!lead) return;
+      const act = b.dataset.pop;
+      if (act === 'view') openPlace(lead);
+      if (act === 'compose') openCompose(lead);
+      if (act === 'save') { saveLead(lead); renderResults(); b.replaceWith(Object.assign(document.createElement('span'), { className: 'muted small', textContent: '✓ сохранено' })); toast('Сохранено в «Мои контакты»'); }
+      if (act === 'list') { toggleMapFull(false); focusCard(lead.id); }
+    }));
+  });
+}
+
+function toggleMapFull(force) {
+  const el = $('#map');
+  const on = typeof force === 'boolean' ? force : !el.classList.contains('map-full');
+  el.classList.toggle('map-full', on);
+  document.body.classList.toggle('no-scroll', on);
+  const btn = $('#mapFullBtn');
+  if (btn) {
+    btn.textContent = on ? '✕' : '⛶';
+    btn.title = on ? 'Свернуть карту (Esc)' : 'Карта на весь экран';
+  }
+  setTimeout(() => map?.invalidateSize(), 60);
+}
+
+function popupHtml(l) {
+  const cat = CATEGORY_BY_ID[l.category];
+  const saved = state.saved.has(l.id);
+  const id = esc(l.id);
+  return `<div class="pop">
+    <div class="pop-title">${cat?.icon || ''} ${esc(l.name)}</div>
+    <div class="pop-meta"><span class="badge fit-${l.fit?.level}">${FIT_LABEL[l.fit?.level] || ''}</span> ${esc(cat?.label || '')}</div>
+    ${l.address ? `<div class="pop-addr">📍 ${esc(l.address)}</div>` : ''}
+    ${(l.emails || []).length ? `<div class="pop-addr">✉️ ${esc(l.emails[0])}</div>` : ''}
+    <div class="pop-actions">
+      <a class="btn sm" href="${esc(googleMapsUrl(l))}" target="_blank" rel="noopener">🗺️ Google Maps</a>
+      <button class="btn sm" data-pop="view" data-id="${id}">👁️ Посмотреть</button>
+      ${(l.emails || []).length ? `<button class="btn sm primary" data-pop="compose" data-id="${id}">✉️ Написать</button>` : ''}
+      ${saved ? '' : `<button class="btn sm" data-pop="save" data-id="${id}">➕ Сохранить</button>`}
+      <button class="btn sm ghost" data-pop="list" data-id="${id}">≡ В списке</button>
+    </div>
+  </div>`;
+}
+
+function showOnMap(id) {
+  const m = markers.get(id);
+  if (!m || !map) return;
+  $('#map').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  map.setView(m.getLatLng(), Math.max(map.getZoom(), 16));
+  m.openPopup();
 }
 
 const FIT_COLOR = { ok: '#16a34a', check: '#d97706', bad: '#dc2626' };
@@ -122,7 +214,7 @@ function renderMarkers(leads) {
       fillColor: FIT_COLOR[l.fit?.level] || '#2563eb', fillOpacity: 0.9,
     });
     m.bindTooltip(`${CATEGORY_BY_ID[l.category]?.icon || ''} ${esc(l.name)}`);
-    m.on('click', () => focusCard(l.id));
+    m.bindPopup(() => popupHtml(l), { maxWidth: 320, minWidth: 240 });
     m.addTo(markerLayer);
     markers.set(l.id, m);
     pts.push([l.lat, l.lon]);
@@ -438,6 +530,7 @@ function leadCard(l) {
       <div class="lead-actions">
         <a class="btn sm" href="${esc(googleMapsUrl(l))}" target="_blank" rel="noopener">🗺️ Google Maps</a>
         <button class="btn sm" data-act="view">👁️ Посмотреть</button>
+        <button class="btn sm" data-act="locate">📍 На карте</button>
         ${emails.length
           ? '<button class="btn sm primary" data-act="compose">✉️ Написать в Gmail</button>'
           : (state.server.emails && l.website
@@ -462,6 +555,7 @@ function bindCards(root, getLead) {
       return;
     }
     if (act === 'view') openPlace(lead);
+    if (act === 'locate') showOnMap(lead.id);
     if (act === 'compose') openCompose(lead);
     if (act === 'save') { saveLead(lead); renderResults(); toast('Сохранено в «Мои контакты»'); }
     if (act === 'tracker') showTab('tracker');
@@ -556,12 +650,16 @@ function openPlace(lead) {
 // ---------- compose modal ----------
 const compose = { lead: null, queue: null, queueIndex: 0, queueKind: 'cold' };
 
+function initComposeTemplates() {
+  $('#cmTemplate').innerHTML = Object.entries(tpls()).map(([id, t]) => `<option value="${id}">${esc(t.label)}</option>`).join('');
+}
+
 function initCompose() {
   const sel = $('#cmTemplate');
-  sel.innerHTML = Object.entries(state.templates).map(([id, t]) => `<option value="${id}">${esc(t.label)}</option>`).join('');
+  initComposeTemplates();
   sel.addEventListener('change', fillCompose);
   $('#cmPosition').addEventListener('input', debounce(fillCompose, 200));
-  ['cmTo', 'cmSubject', 'cmBody'].forEach((id) => $(`#${id}`).addEventListener('input', updateComposeLinks));
+  ['cmTo', 'cmCc', 'cmSubject', 'cmBody'].forEach((id) => $(`#${id}`).addEventListener('input', updateComposeLinks));
   $('#cmCopy').addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(`${$('#cmSubject').value}\n\n${$('#cmBody').value}`); toast('Скопировано'); } catch { toast('Не удалось скопировать'); }
   });
@@ -584,6 +682,8 @@ function openCompose(lead, { templateId, queue, queueKind } = {}) {
   $('#cmTemplate').value = tid;
   $('#cmTitle').textContent = `Письмо: ${lead.name}`;
   $('#cmTo').value = (lead.emails || []).join(', ');
+  $('#cmCc').value = partnerCc(state.profile);
+  $('#cmCcField').hidden = mode() !== 'pair';
   fillCompose();
   renderQueueInfo();
   if (!$('#composeModal').open) $('#composeModal').showModal();
@@ -593,14 +693,14 @@ function fillCompose() {
   const tid = $('#cmTemplate').value;
   $('#cmPositionField').hidden = tid !== 'vacancy';
   const extra = tid === 'vacancy' && $('#cmPosition').value.trim() ? { positionTitle: $('#cmPosition').value.trim() } : {};
-  const { subject, body } = composeEmail(state.templates, tid, state.profile, compose.lead, extra);
+  const { subject, body } = composeEmail(tpls(), tid, state.profile, compose.lead, extra);
   $('#cmSubject').value = subject;
   $('#cmBody').value = body;
   updateComposeLinks();
 }
 
 function updateComposeLinks() {
-  const msg = { to: $('#cmTo').value.trim(), subject: $('#cmSubject').value, body: $('#cmBody').value };
+  const msg = { to: $('#cmTo').value.trim(), cc: $('#cmCc').value.trim(), subject: $('#cmSubject').value, body: $('#cmBody').value };
   $('#cmGmail').href = gmailComposeUrl({ ...msg, authuser: state.profile.gmailAccount });
   $('#cmMailto').href = mailtoUrl(msg);
 }
@@ -658,7 +758,7 @@ function initTracker() {
   });
   $('#exportJson').addEventListener('click', () => {
     download(`wt-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify({
-      version: 1, exportedAt: new Date().toISOString(), leads: [...state.saved.values()], profile: state.profile, templates: state.templates,
+      version: 1, exportedAt: new Date().toISOString(), leads: [...state.saved.values()], profile: state.profile, templates: state.tpl,
     }, null, 2), 'application/json');
   });
   $('#importJson').addEventListener('change', async (e) => {
@@ -670,12 +770,15 @@ function initTracker() {
       let n = 0;
       for (const l of leads) {
         if (!l?.id || !l?.name) continue;
-        const prev = state.saved.get(l.id);
-        state.saved.set(l.id, toSavedLead({ ...prev, ...l }));
+        state.saved.set(l.id, mergeSavedLeads(state.saved.get(l.id), l));
         n += 1;
       }
       if (data.profile) { state.profile = { ...DEFAULT_PROFILE, ...data.profile }; save(KEYS.profile, state.profile); fillProfileForm(); }
-      if (data.templates) { state.templates = { ...structuredClone(DEFAULT_TEMPLATES), ...data.templates }; save(KEYS.templates, state.templates); }
+      if (data.templates) {
+        const t = data.templates.solo || data.templates.pair ? data.templates : { solo: data.templates };
+        if (t.solo) { state.tpl.solo = { ...structuredClone(DEFAULT_TEMPLATES), ...t.solo }; save(KEYS.templates, state.tpl.solo); }
+        if (t.pair) { state.tpl.pair = { ...structuredClone(DEFAULT_TEMPLATES_PAIR), ...t.pair }; save(KEYS.templatesPair, state.tpl.pair); }
+      }
       persistLeads();
       renderTracker();
       toast(`Импортировано контактов: ${n}`);
@@ -811,15 +914,30 @@ function renderTracker() {
 function fillProfileForm() {
   const f = $('#profileForm');
   Object.entries(state.profile).forEach(([k, v]) => { if (f.elements[k]) f.elements[k].value = v ?? ''; });
+  syncPairFields();
+}
+
+function syncPairFields() {
+  const f = $('#profileForm');
+  const pair = f.elements.searchMode.value === 'pair';
+  const exp = f.elements.experience;
+  if (pair && (!exp.value.trim() || exp.value.trim() === SOLO_EXPERIENCE)) exp.value = PAIR_EXPERIENCE;
+  if (!pair && (!exp.value.trim() || exp.value.trim() === PAIR_EXPERIENCE)) exp.value = SOLO_EXPERIENCE;
+  $('#partnerFields').hidden = !pair;
+  $('#resumeLabel').textContent = pair ? 'Ссылка на общее резюме (Google Drive, «доступ по ссылке»)' : 'Ссылка на резюме (Google Drive, «доступ по ссылке»)';
+  $('#experienceLabel').textContent = pair ? 'О вас обоих: опыт, качества (1–2 предложения на английском, от «we»)' : 'Опыт / о себе (1–2 предложения на английском)';
 }
 
 function initProfile() {
   fillProfileForm();
+  $$('#profileForm input[name="searchMode"]').forEach((r) => r.addEventListener('change', syncPairFields));
   $('#profileForm').addEventListener('submit', (e) => {
     e.preventDefault();
     const f = e.target;
+    const prevMode = mode();
     Object.keys(DEFAULT_PROFILE).forEach((k) => { if (f.elements[k]) state.profile[k] = f.elements[k].value.trim(); });
     save(KEYS.profile, state.profile);
+    if (prevMode !== mode()) { initComposeTemplates(); renderTemplateEditor(); }
     $('#profileSaved').hidden = false;
     setTimeout(() => { $('#profileSaved').hidden = true; }, 2000);
     renderTemplatePreview();
@@ -832,15 +950,15 @@ function initProfile() {
   $('#tplSubject').addEventListener('input', renderTemplatePreview);
   $('#tplBody').addEventListener('input', renderTemplatePreview);
   $('#tplSave').addEventListener('click', () => {
-    state.templates[current] = { ...state.templates[current], subject: $('#tplSubject').value, body: $('#tplBody').value };
-    save(KEYS.templates, state.templates);
+    tpls()[current] = { ...tpls()[current], subject: $('#tplSubject').value, body: $('#tplBody').value };
+    saveTemplates();
     $('#tplSaved').hidden = false;
     setTimeout(() => { $('#tplSaved').hidden = true; }, 2000);
   });
   $('#tplReset').addEventListener('click', () => {
     if (!confirm('Вернуть стандартный текст шаблона?')) return;
-    state.templates[current] = structuredClone(DEFAULT_TEMPLATES[current]);
-    save(KEYS.templates, state.templates);
+    tpls()[current] = structuredClone(defaultTemplatesFor(mode())[current]);
+    saveTemplates();
     renderTemplateEditor(current);
   });
   renderTemplateEditor.current = () => current;
@@ -848,7 +966,10 @@ function initProfile() {
 
 function renderTemplateEditor(id) {
   const tid = id || renderTemplateEditor.current?.() || 'cold';
-  const t = state.templates[tid];
+  const t = tpls()[tid];
+  $('#tplModeNote').textContent = mode() === 'pair'
+    ? 'Сейчас режим «вдвоём»: письма пишутся от «we», подписаны обоими именами.'
+    : 'Сейчас режим «один»: письма от первого лица.';
   $('#tplSubject').value = t.subject;
   $('#tplBody').value = t.body;
   renderTemplatePreview();

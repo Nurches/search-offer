@@ -154,6 +154,7 @@
           <button class="btn ghost" id="exportJson" type="button">Бэкап JSON</button>
           <label class="btn ghost file-btn">Импорт<input type="file" id="importJson" accept="application/json" hidden></label>
         </div>
+        <p class="hint">Ищете вдвоём с разных телефонов? Контакты хранятся в браузере, поэтому делитесь ими так: «Бэкап JSON» → отправить подруге → у неё «Импорт». Статусы объединятся.</p>
         <div id="trackerList" class="tracker-list"></div>
       </div>
     </section>
@@ -164,6 +165,14 @@
         <form class="card" id="profileForm">
           <h2>Мой профиль</h2>
           <p class="hint">Данные подставляются в письма. Хранятся только в этом браузере.</p>
+          <div class="field">
+            <span>Ищу работу</span>
+            <div class="seg">
+              <label><input type="radio" name="searchMode" value="solo"> 🧍 Один / одна</label>
+              <label><input type="radio" name="searchMode" value="pair"> 👭 Вдвоём с подругой / другом</label>
+            </div>
+          </div>
+          <h3>Я</h3>
           <div class="grid2">
             <label class="field"><span>Имя и фамилия (латиницей)</span><input name="name" placeholder="Nurassyl ..."></label>
             <label class="field"><span>Мой email</span><input name="email" type="email" placeholder="you@gmail.com"></label>
@@ -178,8 +187,22 @@
             <label class="field"><span>Могу начать с</span><input name="startDate"></label>
             <label class="field"><span>Работаю до</span><input name="endDate"></label>
           </div>
-          <label class="field"><span>Опыт / о себе (1–2 предложения на английском)</span><textarea name="experience" rows="3"></textarea></label>
-          <label class="field"><span>Ссылка на резюме (Google Drive, «доступ по ссылке»)</span><input name="resumeLink" type="url" placeholder="https://drive.google.com/..."></label>
+          <fieldset class="partner" id="partnerFields">
+            <legend>👭 Подруга / друг</legend>
+            <div class="grid2">
+              <label class="field"><span>Имя и фамилия (латиницей)</span><input name="partnerName"></label>
+              <label class="field"><span>Email</span><input name="partnerEmail" type="email"></label>
+              <label class="field"><span>Телефон / WhatsApp</span><input name="partnerPhone"></label>
+              <label class="field"><span>Университет (если другой)</span><input name="partnerUniversity" placeholder="пусто = тот же, что у меня"></label>
+              <label class="field"><span>Уровень английского</span><input name="partnerEnglish"></label>
+              <label class="field"><span>Ставить её/его в копию писем</span>
+                <select name="ccPartner"><option value="yes">Да: ответ увидим оба</option><option value="no">Нет</option></select>
+              </label>
+            </div>
+            <p class="hint">Письма уходят от твоего Gmail, но пишутся от «we», подписаны обоими именами, с контактами обоих. Работодателю сразу понятно, что нужно 2 места.</p>
+          </fieldset>
+          <label class="field"><span id="experienceLabel">Опыт / о себе (1–2 предложения на английском)</span><textarea name="experience" rows="3"></textarea></label>
+          <label class="field"><span id="resumeLabel">Ссылка на резюме (Google Drive, «доступ по ссылке»)</span><input name="resumeLink" type="url" placeholder="https://drive.google.com/..."></label>
           <label class="field"><span>Gmail-аккаунт для отправки (если в браузере их несколько)</span><input name="gmailAccount" type="email" placeholder="you@gmail.com"></label>
           <p class="hint">Gmail через ссылку не умеет прикреплять файлы, поэтому резюме идёт ссылкой. Открой доступ «Все, у кого есть ссылка».</p>
           <div class="row"><button class="btn primary" type="submit">Сохранить профиль</button><span class="saved" id="profileSaved" hidden>Сохранено ✓</span></div>
@@ -187,6 +210,7 @@
 
         <div class="card">
           <h2>Шаблоны писем</h2>
+          <p class="hint" id="tplModeNote"></p>
           <div class="seg" id="tplTabs"></div>
           <label class="field"><span>Тема</span><input id="tplSubject"></label>
           <label class="field"><span>Текст</span><textarea id="tplBody" rows="16"></textarea></label>
@@ -272,6 +296,7 @@
             <li>Название должности, обязанности, адрес работы, контакт менеджера (имя, телефон, email)</li>
             <li>Работодатель согласен пройти проверку спонсора (InterExchange свяжется с ним напрямую)</li>
             <li>Нужен ли бесплатный тренинг или униформа за свой счёт</li>
+            <li><b>Ищете вдвоём:</b> оффер нужен на <b>каждого отдельно</b> (своя должность, часы, ставка). Проще всего один работодатель, или хотя бы один город и общее жильё</li>
           </ul>
           <p class="hint">Требования спонсора могут меняться. Финальную проверку оффера делает ЦМО / InterExchange, уточняй у них дедлайн подачи.</p>
         </div>
@@ -324,7 +349,10 @@
         <label class="field"><span>Шаблон</span><select id="cmTemplate"></select></label>
         <label class="field" id="cmPositionField" hidden><span>Должность</span><input id="cmPosition" placeholder="e.g. Housekeeper"></label>
       </div>
-      <label class="field"><span>Кому</span><input id="cmTo" type="text"></label>
+      <div class="grid2">
+        <label class="field"><span>Кому</span><input id="cmTo" type="text"></label>
+        <label class="field" id="cmCcField"><span>Копия (подруга / друг)</span><input id="cmCc" type="text"></label>
+      </div>
       <label class="field"><span>Тема</span><input id="cmSubject"></label>
       <label class="field"><span>Текст</span><textarea id="cmBody" rows="14"></textarea></label>
       <div class="row wrap">

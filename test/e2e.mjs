@@ -68,6 +68,25 @@ try {
   assert.equal(await page.locator('.lead.fit-bad').count(), 1);
   await page.screenshot({ path: path.join(outDir, 'search-desktop.png'), fullPage: false });
 
+  // Bigger map, popup with actions, fullscreen
+  const mapH = await page.evaluate(() => document.querySelector('#map').getBoundingClientRect().height);
+  assert.ok(mapH >= 440, `map height ${mapH}`);
+  await page.locator('.lead', { hasText: 'Boardwalk Fries' }).locator('[data-act="locate"]').click();
+  await page.waitForSelector('.leaflet-popup .pop-title');
+  assert.match(await page.textContent('.leaflet-popup'), /Boardwalk Fries/);
+  await page.click('#mapFullBtn');
+  assert.equal(await page.evaluate(() => document.querySelector('#map').classList.contains('map-full')), true);
+  const fullRect = await page.evaluate(() => { const r = document.querySelector('#map').getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; });
+  assert.deepEqual(fullRect.map(Math.round), [0, 0, 1360, 900]);
+  assert.equal(await page.evaluate(() => !!document.elementFromPoint(100, 300).closest('#map')), true);
+  await page.screenshot({ path: path.join(outDir, 'map-fullscreen.png') });
+  await page.click('.leaflet-popup [data-pop="view"]');
+  await page.waitForSelector('#placeModal[open]');
+  await page.click('#placeModal [data-close]');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.evaluate(() => document.querySelector('#map').classList.contains('map-full')), false);
+  await page.evaluate(() => window.wt && document.querySelector('.leaflet-popup-close-button')?.click());
+
   // Google Maps link + embed modal
   const first = page.locator('.lead', { hasText: 'Boardwalk Fries' });
   assert.match(await first.locator('a', { hasText: 'Google Maps' }).getAttribute('href'), /google\.com\/maps\/search\/\?api=1&query=Boardwalk\+Fries/);
@@ -81,8 +100,22 @@ try {
   await page.fill('#profileForm [name="name"]', 'Test Student');
   await page.fill('#profileForm [name="university"]', 'Test University');
   await page.fill('#profileForm [name="resumeLink"]', 'https://drive.google.com/file/d/test');
+  // pair mode is the default: partner fields visible, joint resume label
+  assert.equal(await page.isVisible('#partnerFields'), true);
+  assert.match(await page.textContent('#resumeLabel'), /общее резюме/);
+  assert.match(await page.inputValue('#profileForm [name="experience"]'), /^We are hardworking/);
+  await page.fill('#profileForm [name="partnerName"]', 'Test Friend');
+  await page.fill('#profileForm [name="partnerEmail"]', 'friend@example.org');
   await page.click('#profileForm button[type="submit"]');
-  assert.match(await page.textContent('#tplPreview'), /Test Student/);
+  assert.match(await page.textContent('#tplPreview'), /Test Student and Test Friend/);
+  assert.match(await page.textContent('#tplModeNote'), /вдвоём/);
+  // switching to solo hides partner fields and changes templates
+  await page.click('#profileForm .seg label:has(input[value="solo"])');
+  assert.equal(await page.isVisible('#partnerFields'), false);
+  await page.click('#profileForm button[type="submit"]');
+  assert.doesNotMatch(await page.textContent('#tplPreview'), /Test Friend/);
+  await page.click('#profileForm .seg label:has(input[value="pair"])');
+  await page.click('#profileForm button[type="submit"]');
   await page.screenshot({ path: path.join(outDir, 'letter.png') });
   await page.click('.tab[data-tab="search"]');
 
@@ -93,7 +126,9 @@ try {
   assert.equal(gmail.hostname, 'mail.google.com');
   assert.equal(gmail.searchParams.get('to'), 'jobs@boardwalkfries.test');
   assert.match(gmail.searchParams.get('body'), /Dear Boardwalk Fries Hiring Team/);
-  assert.match(gmail.searchParams.get('body'), /Test Student/);
+  assert.match(gmail.searchParams.get('body'), /together with my friend Test Friend/);
+  assert.match(gmail.searchParams.get('body'), /Test Student and Test Friend/);
+  assert.equal(gmail.searchParams.get('cc'), 'friend@example.org');
   await page.screenshot({ path: path.join(outDir, 'compose.png') });
   await page.click('#cmMarkSent');
   assert.equal(await page.textContent('#trackerCount'), '1');

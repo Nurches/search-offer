@@ -17,7 +17,18 @@ export const DEFAULT_PROFILE = {
   experience: 'I am hardworking, friendly and quick to learn, and I have experience working with customers.',
   resumeLink: '',
   gmailAccount: '',
+  // Searching as a pair (two friends, one joint resume)
+  searchMode: 'pair',
+  partnerName: '',
+  partnerEmail: '',
+  partnerPhone: '',
+  partnerUniversity: '',
+  partnerEnglish: 'Upper-Intermediate (B2)',
+  ccPartner: 'yes',
 };
+
+export const SOLO_EXPERIENCE = DEFAULT_PROFILE.experience;
+export const PAIR_EXPERIENCE = 'We are hardworking, friendly and quick to learn, and we both have experience working with customers.';
 
 export const DEFAULT_TEMPLATES = {
   cold: {
@@ -88,6 +99,76 @@ Best regards,
   },
 };
 
+export const DEFAULT_TEMPLATES_PAIR = {
+  cold: {
+    label: 'Холодное письмо (вакансий может не быть)',
+    subject: 'Summer 2027 Seasonal Jobs for Two J-1 Work and Travel Students from {{country}}',
+    body: `Dear {{business}} Hiring Team,
+
+My name is {{name}}, and together with my friend {{partnerName}} we are {{studentsClause}} in {{country}}. We are both participating in the J-1 Summer Work and Travel program in 2027 through {{sponsor}}, a U.S. Department of State designated sponsor, and we are looking for seasonal jobs in {{city}} from {{startDate}} to {{endDate}}.
+
+We would love to join your team at {{business}} together, in any entry-level roles, for example {{positions}}. Even if you do not have open positions posted right now, we would be very grateful to be considered for the 2027 season. Working at the same place makes housing and transportation easier for us, and we are happy to work different positions or shifts.
+
+A little about us:
+- English level: {{englishLine}}
+- Both available full-time (32–40+ hours per week) for the whole season, including weekends and holidays
+- {{experience}}
+
+Hiring J-1 students is easy for employers: our sponsor arranges the visas, health insurance and SEVIS registration, there is no sponsorship fee for you, and J-1 students are generally exempt from FICA taxes (Social Security and Medicare). We would only need a job offer for each of us to submit to our sponsor.
+
+Our resume: {{resumeLink}}
+We are available for a video interview (Zoom, Skype, WhatsApp) at any time convenient for you, together or separately.
+
+Thank you for your time and consideration. We look forward to hearing from you!
+
+Best regards,
+{{names}}
+{{contacts}}`,
+  },
+  vacancy: {
+    label: 'Отклик на вакансию',
+    subject: 'Application for {{positionTitle}} (2 positions) – Summer 2027, J-1 Work and Travel',
+    body: `Dear Hiring Manager,
+
+We are writing to apply for the {{positionTitle}} position at {{business}} for the 2027 summer season. My name is {{name}}, and together with my friend {{partnerName}} we are {{studentsClause}} in {{country}}. We would like to apply together for two positions, but we are also open to different roles or shifts.
+
+We will be in the United States on the J-1 Summer Work and Travel program through {{sponsor}} and we are available to work from {{startDate}} to {{endDate}}, full-time, including weekends and holidays.
+
+- English level: {{englishLine}}
+- {{experience}}
+
+Our sponsor handles the visa, insurance and SEVIS paperwork, and there is no sponsorship fee for employers. We would need a job offer for each of us.
+
+Our resume: {{resumeLink}}
+We would be glad to have a video interview at your convenience.
+
+Thank you for considering our application.
+
+Best regards,
+{{names}}
+{{contacts}}`,
+  },
+  followup: {
+    label: 'Повторное письмо (через 7–10 дней)',
+    subject: 'Following up: Summer 2027 seasonal jobs – {{names}}',
+    body: `Dear {{business}} Hiring Team,
+
+We hope you are doing well. We are following up on our email about seasonal positions at {{business}} for summer 2027 ({{startDate}} – {{endDate}}) for the two of us.
+
+We are still very interested in working with your team in any entry-level roles, and we are available for a video interview at any time. Our resume: {{resumeLink}}
+
+Thank you again for your time!
+
+Best regards,
+{{names}}
+{{contacts}}`,
+  },
+};
+
+export function defaultTemplatesFor(mode) {
+  return mode === 'pair' ? DEFAULT_TEMPLATES_PAIR : DEFAULT_TEMPLATES;
+}
+
 export const STATUSES = [
   { id: 'new', label: 'Новый', color: 'gray' },
   { id: 'emailed', label: 'Письмо отправлено', color: 'blue' },
@@ -104,14 +185,21 @@ export function renderTemplate(tpl, vars) {
   return String(tpl).replace(/\{\{\s*(\w+)\s*\}\}/g, (_, k) => (vars[k] ?? '').toString());
 }
 
+function contactLine(name, phone, email) {
+  const bits = [phone, email].filter(Boolean).join(', ');
+  return bits ? `${name}: ${bits}` : '';
+}
+
 export function buildVars(profile, lead = {}, extra = {}) {
   const p = { ...DEFAULT_PROFILE, ...profile };
   const cat = CATEGORY_BY_ID[lead.category];
   const city = [lead.city, lead.state].filter(Boolean).join(', ') || 'your area';
-  return {
+  const name = p.name || '[Your Name]';
+  const university = p.university || '[University]';
+  const vars = {
     ...p,
-    name: p.name || '[Your Name]',
-    university: p.university || '[University]',
+    name,
+    university,
     studyYear: p.studyYear || '[2nd-year]',
     email: p.email || '',
     resumeLink: p.resumeLink || '[link to resume]',
@@ -120,8 +208,29 @@ export function buildVars(profile, lead = {}, extra = {}) {
     city,
     positions: cat?.positions || 'housekeeping, food service or guest services',
     positionTitle: extra.positionTitle || cat?.positions?.split(',')[0]?.trim() || 'seasonal',
-    ...extra,
   };
+  if (p.searchMode === 'pair') {
+    const partnerName = p.partnerName || "[Friend's Name]";
+    const partnerUni = p.partnerUniversity.trim();
+    const sameUni = !partnerUni || partnerUni.toLowerCase() === university.toLowerCase();
+    Object.assign(vars, {
+      partnerName,
+      names: `${name} and ${partnerName}`,
+      studentsClause: sameUni ? `both students at ${university}` : `students at ${university} and ${partnerUni}`,
+      englishLine: !p.partnerEnglish || p.partnerEnglish === p.english
+        ? `${p.english} (both)`
+        : `${name} – ${p.english}, ${partnerName} – ${p.partnerEnglish}`,
+      experience: p.experience === SOLO_EXPERIENCE ? PAIR_EXPERIENCE : p.experience,
+      contacts: [contactLine(name, p.phone, p.email), contactLine(partnerName, p.partnerPhone, p.partnerEmail)].filter(Boolean).join('\n'),
+    });
+  }
+  return { ...vars, ...extra };
+}
+
+/** CC address for the partner when searching as a pair. */
+export function partnerCc(profile) {
+  const p = { ...DEFAULT_PROFILE, ...profile };
+  return p.searchMode === 'pair' && p.ccPartner === 'yes' ? (p.partnerEmail || '').trim() : '';
 }
 
 export function composeEmail(templates, templateId, profile, lead, extra) {
@@ -133,14 +242,15 @@ export function composeEmail(templates, templateId, profile, lead, extra) {
   };
 }
 
-export function gmailComposeUrl({ to, subject, body, authuser }) {
+export function gmailComposeUrl({ to, cc, subject, body, authuser }) {
   const params = new URLSearchParams({ view: 'cm', fs: '1', to: to || '', su: subject || '', body: body || '' });
+  if (cc) params.set('cc', cc);
   if (authuser) params.set('authuser', authuser);
   return `https://mail.google.com/mail/?${params}`;
 }
 
-export function mailtoUrl({ to, subject, body }) {
-  return `mailto:${encodeURIComponent(to || '')}?subject=${encodeURIComponent(subject || '')}&body=${encodeURIComponent(body || '')}`;
+export function mailtoUrl({ to, cc, subject, body }) {
+  return `mailto:${encodeURIComponent(to || '')}?${cc ? `cc=${encodeURIComponent(cc)}&` : ''}subject=${encodeURIComponent(subject || '')}&body=${encodeURIComponent(body || '')}`;
 }
 
 function placeQuery(lead) {

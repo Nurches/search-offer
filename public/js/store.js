@@ -19,6 +19,7 @@ export const KEYS = {
   leads: 'wt.leads.v1',
   profile: 'wt.profile.v1',
   templates: 'wt.templates.v1',
+  templatesPair: 'wt.templates.pair.v1',
   settings: 'wt.settings.v1',
   lastSearch: 'wt.lastSearch.v1',
 };
@@ -36,6 +37,30 @@ export function toSavedLead(lead) {
   out.addedAt = lead.addedAt || new Date().toISOString();
   out.lastContactAt = lead.lastContactAt || null;
   return out;
+}
+
+const STATUS_RANK = { new: 0, skip: 1, emailed: 2, followup: 3, rejected: 4, replied: 5, interview: 6, offer: 7 };
+
+/** Merges two copies of the same lead (e.g. a friend's backup): furthest status wins, history/emails/notes combine. */
+export function mergeLeads(a, b) {
+  if (!a) return toSavedLead(b);
+  if (!b) return toSavedLead(a);
+  const status = (STATUS_RANK[b.status] ?? 0) > (STATUS_RANK[a.status] ?? 0) ? b.status : a.status;
+  const seen = new Set();
+  const history = [...(a.history || []), ...(b.history || [])]
+    .filter((h) => { const k = `${h.at}|${h.action}`; if (seen.has(k)) return false; seen.add(k); return true; })
+    .sort((x, y) => String(x.at).localeCompare(String(y.at)));
+  const notes = [a.notes, b.notes].map((n) => (n || '').trim()).filter(Boolean)
+    .filter((n, i, arr) => arr.indexOf(n) === i).join(' | ');
+  const last = [a.lastContactAt, b.lastContactAt].filter(Boolean).sort().pop() || null;
+  const first = [a.addedAt, b.addedAt].filter(Boolean).sort()[0];
+  return toSavedLead({
+    ...a, ...b,
+    status, history, notes,
+    emails: [...new Set([...(a.emails || []), ...(b.emails || [])])],
+    lastContactAt: last,
+    addedAt: first,
+  });
 }
 
 const csvCell = (v) => {
