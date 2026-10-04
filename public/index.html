@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>W&amp;T Job Finder</title>
+  <meta name="description" content="Поиск работодателей для Summer Work and Travel USA по штатам и городам: карта, Google Maps, письма через Gmail и трекер откликов.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧳</text></svg>">
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">🧳</span>
+      <div>
+        <div class="brand-name">W&amp;T Job Finder</div>
+        <div class="brand-sub">Summer Work and Travel USA 2027</div>
+      </div>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="search" role="tab">🔎 Поиск</button>
+      <button class="tab" data-tab="hotspots" role="tab">🏖️ Курорты</button>
+      <button class="tab" data-tab="tracker" role="tab">📋 Мои контакты <span class="pill" id="trackerCount">0</span></button>
+      <button class="tab" data-tab="letter" role="tab">✉️ Письмо и профиль</button>
+      <button class="tab" data-tab="rules" role="tab">✅ Правила W&amp;T</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- SEARCH -->
+    <section class="panel active" id="tab-search">
+      <div class="search-layout">
+        <aside class="search-form card">
+          <form id="searchForm" autocomplete="off">
+            <div class="seg" role="radiogroup" aria-label="Режим поиска">
+              <label><input type="radio" name="mode" value="around" checked> Город + радиус</label>
+              <label><input type="radio" name="mode" value="state"> Весь штат</label>
+            </div>
+
+            <label class="field">
+              <span>Штат</span>
+              <select id="stateSelect" required></select>
+            </label>
+
+            <div class="field city-field" id="cityField">
+              <span>Город</span>
+              <input id="cityInput" type="text" placeholder="Например: Ocean City" autocomplete="off">
+              <ul class="suggest" id="citySuggest" hidden></ul>
+              <div class="chips" id="hotspotChips"></div>
+            </div>
+
+            <label class="field" id="radiusField">
+              <span>Радиус: <b id="radiusLabel">8 км</b></span>
+              <input id="radiusInput" type="range" min="1" max="40" step="1" value="8">
+            </label>
+
+            <fieldset class="field">
+              <legend>Тип работы (подходит под W&amp;T)</legend>
+              <div class="cats" id="categoryList"></div>
+            </fieldset>
+
+            <label class="field">
+              <span>Контакты</span>
+              <select id="contactsSelect">
+                <option value="any">Все заведения</option>
+                <option value="website">Только с сайтом или email</option>
+                <option value="email">Только с email</option>
+              </select>
+            </label>
+
+            <label class="field" id="sourceField" hidden>
+              <span>Источник</span>
+              <select id="sourceSelect">
+                <option value="osm">OpenStreetMap (бесплатно)</option>
+                <option value="google">Google Maps (Places API)</option>
+                <option value="both">Оба источника</option>
+              </select>
+            </label>
+
+            <button class="btn primary block" type="submit" id="searchBtn">Найти работодателей</button>
+            <p class="hint" id="searchHint">Данные: OpenStreetMap. Каждое место можно сразу открыть в Google Maps.</p>
+          </form>
+
+          <div class="launchers" id="launchers" hidden>
+            <h3>Искать прямо в Google Maps</h3>
+            <div class="link-grid" id="gmapsLaunchers"></div>
+            <h3>Вакансии на сайтах</h3>
+            <div class="link-grid" id="jobBoards"></div>
+          </div>
+        </aside>
+
+        <div class="results-col">
+          <div id="map" class="map card" aria-label="Карта"></div>
+          <div class="results-bar card" id="resultsBar" hidden>
+            <div class="results-summary" id="resultsSummary"></div>
+            <div class="results-tools">
+              <input type="search" id="filterInput" placeholder="Фильтр по названию…">
+              <select id="fitFilter">
+                <option value="all">Все</option>
+                <option value="ok">✓ Подходит</option>
+                <option value="check">⚠ Уточнить</option>
+                <option value="bad">✕ Не подходит</option>
+              </select>
+              <select id="sortSelect">
+                <option value="contacts">Сначала с контактами</option>
+                <option value="distance">Ближе к центру</option>
+                <option value="name">По названию</option>
+                <option value="rating">По рейтингу (Google)</option>
+              </select>
+            </div>
+            <div class="bulk">
+              <label class="check"><input type="checkbox" id="selectAll"> Выбрать все</label>
+              <button class="btn" id="bulkSave" type="button">➕ В мои контакты</button>
+              <button class="btn" id="bulkEnrich" type="button" hidden>📧 Найти email с сайтов</button>
+            </div>
+          </div>
+          <div id="status" class="status" role="status" aria-live="polite"></div>
+          <div id="results" class="results"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- HOTSPOTS -->
+    <section class="panel" id="tab-hotspots">
+      <div class="card intro">
+        <h2>Классические W&amp;T-направления</h2>
+        <p>Сезонные курорты, бордвоки, парки развлечений и нацпарки, где каждое лето работают тысячи J-1 студентов. Нажми «Искать здесь», чтобы найти все заведения в радиусе. Названия работодателей — это примеры тех, кто раньше брал J-1; условия на 2027 год всегда уточняй.</p>
+        <div class="hs-filters">
+          <select id="hsRegion"><option value="">Все регионы</option></select>
+          <select id="hsType"><option value="">Все типы</option></select>
+          <input type="search" id="hsSearch" placeholder="Поиск по городу или штату…">
+        </div>
+      </div>
+      <div class="hotspots" id="hotspotGrid"></div>
+    </section>
+
+    <!-- TRACKER -->
+    <section class="panel" id="tab-tracker">
+      <div class="card">
+        <div class="tracker-head">
+          <h2>Мои контакты</h2>
+          <div class="stats" id="trackerStats"></div>
+        </div>
+        <div class="tracker-tools">
+          <input type="search" id="trackerFilter" placeholder="Поиск…">
+          <select id="trackerStatus"><option value="">Все статусы</option></select>
+          <select id="trackerState"><option value="">Все штаты</option></select>
+          <button class="btn primary" id="queueBtn" type="button">🚀 Рассылка по очереди</button>
+          <button class="btn" id="followupBtn" type="button">🔁 Пора напомнить</button>
+          <button class="btn" id="enrichAllBtn" type="button" hidden>📧 Найти email</button>
+          <span class="spacer"></span>
+          <button class="btn ghost" id="exportCsv" type="button">CSV</button>
+          <button class="btn ghost" id="exportJson" type="button">Бэкап JSON</button>
+          <label class="btn ghost file-btn">Импорт<input type="file" id="importJson" accept="application/json" hidden></label>
+        </div>
+        <div id="trackerList" class="tracker-list"></div>
+      </div>
+    </section>
+
+    <!-- LETTER / PROFILE -->
+    <section class="panel" id="tab-letter">
+      <div class="letter-layout">
+        <form class="card" id="profileForm">
+          <h2>Мой профиль</h2>
+          <p class="hint">Данные подставляются в письма. Хранятся только в этом браузере.</p>
+          <div class="grid2">
+            <label class="field"><span>Имя и фамилия (латиницей)</span><input name="name" placeholder="Nurassyl ..."></label>
+            <label class="field"><span>Мой email</span><input name="email" type="email" placeholder="you@gmail.com"></label>
+            <label class="field"><span>Телефон / WhatsApp</span><input name="phone" placeholder="+7 7xx xxx xx xx"></label>
+            <label class="field"><span>Страна</span><input name="country"></label>
+            <label class="field"><span>Университет (на английском)</span><input name="university" placeholder="e.g. Satbayev University"></label>
+            <label class="field"><span>Специальность</span><input name="major" placeholder="e.g. Information Security"></label>
+            <label class="field"><span>Курс</span><input name="studyYear" placeholder="e.g. 2nd-year"></label>
+            <label class="field"><span>Уровень английского</span><input name="english"></label>
+            <label class="field"><span>Спонсор</span><input name="sponsor"></label>
+            <label class="field"><span>Агентство (для себя)</span><input name="agency" placeholder="ЦМО"></label>
+            <label class="field"><span>Могу начать с</span><input name="startDate"></label>
+            <label class="field"><span>Работаю до</span><input name="endDate"></label>
+          </div>
+          <label class="field"><span>Опыт / о себе (1–2 предложения на английском)</span><textarea name="experience" rows="3"></textarea></label>
+          <label class="field"><span>Ссылка на резюме (Google Drive, «доступ по ссылке»)</span><input name="resumeLink" type="url" placeholder="https://drive.google.com/..."></label>
+          <label class="field"><span>Gmail-аккаунт для отправки (если в браузере их несколько)</span><input name="gmailAccount" type="email" placeholder="you@gmail.com"></label>
+          <p class="hint">Gmail через ссылку не умеет прикреплять файлы, поэтому резюме идёт ссылкой. Открой доступ «Все, у кого есть ссылка».</p>
+          <div class="row"><button class="btn primary" type="submit">Сохранить профиль</button><span class="saved" id="profileSaved" hidden>Сохранено ✓</span></div>
+        </form>
+
+        <div class="card">
+          <h2>Шаблоны писем</h2>
+          <div class="seg" id="tplTabs"></div>
+          <label class="field"><span>Тема</span><input id="tplSubject"></label>
+          <label class="field"><span>Текст</span><textarea id="tplBody" rows="16"></textarea></label>
+          <p class="hint">Переменные: <code>{{business}}</code> <code>{{city}}</code> <code>{{positions}}</code> <code>{{name}}</code> <code>{{university}}</code> <code>{{startDate}}</code> <code>{{endDate}}</code> <code>{{sponsor}}</code> <code>{{resumeLink}}</code>…</p>
+          <div class="row">
+            <button class="btn primary" id="tplSave" type="button">Сохранить шаблон</button>
+            <button class="btn ghost" id="tplReset" type="button">Вернуть стандартный</button>
+            <span class="saved" id="tplSaved" hidden>Сохранено ✓</span>
+          </div>
+          <h3>Предпросмотр</h3>
+          <div class="preview" id="tplPreview"></div>
+          <div class="card subtle">
+            <h3>Советы для ответа</h3>
+            <ul class="tips">
+              <li>Пиши с утра по времени США (в Казахстане это вечер), во вторник–четверг.</li>
+              <li>Не больше 30–50 писем в день с одного Gmail, чтобы не попасть в спам.</li>
+              <li>Через 7–10 дней без ответа отправь короткое напоминание (кнопка «Пора напомнить»).</li>
+              <li>Пиши каждому отдельно, не массовой рассылкой в копии.</li>
+              <li>Звонок или сообщение в Facebook/Instagram после письма заметно повышает шанс ответа.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="card settings-card">
+        <h2>⚙️ Сервер (необязательно)</h2>
+        <p class="hint">Без сервера сайт ищет через OpenStreetMap и даёт ссылки на Google. С сервером он ещё сам находит email на сайтах заведений и умеет искать через Google Places (если задан ключ). Если сервер запущен на другом адресе, укажи его здесь.</p>
+        <div class="row wrap">
+          <input id="apiBaseInput" type="url" placeholder="https://my-wt-server.onrender.com/" style="flex:1 1 260px">
+          <button class="btn" id="apiBaseSave" type="button">Подключить</button>
+        </div>
+        <p class="hint" id="serverStatus"></p>
+      </div>
+    </section>
+
+    <!-- RULES -->
+    <section class="panel" id="tab-rules">
+      <div class="rules">
+        <div class="card">
+          <h2>Какая работа подходит под Summer Work and Travel</h2>
+          <p>Программа J-1 Summer Work and Travel регулируется Госдепартаментом США (<a href="https://www.ecfr.gov/current/title-22/chapter-I/subchapter-A/part-62/subpart-B/section-62.32" target="_blank" rel="noopener">22 CFR 62.32</a>). Работа должна быть <b>сезонной или временной</b>, не требовать особой квалификации и давать <b>общение с американцами</b>.</p>
+          <div class="grid2">
+            <div>
+              <h3 class="ok">✓ Обычно подходит</h3>
+              <ul>
+                <li>Отели, мотели, курорты: housekeeping, front desk, laundry</li>
+                <li>Рестораны, фастфуд, кафе, мороженое: busser, host, dishwasher, cashier, line cook</li>
+                <li>Парки развлечений и аквапарки: ride operator, games, food &amp; beverage</li>
+                <li>Нацпарки, лоджи, кемпинги</li>
+                <li>Магазины в туристических зонах: сувениры, пляжные товары</li>
+                <li>Lifeguard — только при наличии сертификата</li>
+                <li>Супермаркеты в курортных городах (cashier, stocker)</li>
+              </ul>
+            </div>
+            <div>
+              <h3 class="bad">✕ Запрещено правилами</h3>
+              <ul>
+                <li>Домашний персонал: няня, сиделка, садовник, водитель</li>
+                <li>Вождение машин и лодок, где нужны права; педикэбы, rolling chairs</li>
+                <li>Работа с пациентами (больницы, клиники, nursing homes)</li>
+                <li>Индустрия «для взрослых»</li>
+                <li>Работа преимущественно с 22:00 до 6:00</li>
+                <li>Опасные для молодёжи работы (по списку Минтруда)</li>
+                <li>Массаж, тату, пирсинг, маникюр</li>
+                <li>Оплата в основном комиссией, без гарантии минималки</li>
+                <li>Участие в азартных играх и ставках</li>
+                <li>Склады, распределительные центры, химическая обработка от вредителей</li>
+                <li>Передвижные ярмарки и выездные концессии</li>
+                <li>Производство, стройка, сельское хозяйство, добыча</li>
+                <li>Работа, для которой есть отдельная J-1 категория (вожатый в лагере, стажёр)</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Чек-лист job offer (Self-Arranged через InterExchange)</h2>
+          <ul class="checklist">
+            <li>Прямой работодатель, не кадровое агентство и не посредник</li>
+            <li>Сезонная позиция на <b>весь</b> твой период (примерно конец мая – середина сентября 2027)</li>
+            <li>Не меньше <b>32 часов в неделю</b>, лучше 35–40+</li>
+            <li>Ставка в час не ниже минимальной зарплаты штата и города; оплата сверхурочных по закону</li>
+            <li>Понятно, кто даёт жильё и сколько оно стоит в неделю; можно ли дойти или доехать до работы</li>
+            <li>Название должности, обязанности, адрес работы, контакт менеджера (имя, телефон, email)</li>
+            <li>Работодатель согласен пройти проверку спонсора (InterExchange свяжется с ним напрямую)</li>
+            <li>Нужен ли бесплатный тренинг или униформа за свой счёт</li>
+          </ul>
+          <p class="hint">Требования спонсора могут меняться. Финальную проверку оффера делает ЦМО / InterExchange, уточняй у них дедлайн подачи.</p>
+        </div>
+
+        <div class="card">
+          <h2>⚠️ Красные флаги (мошенничество)</h2>
+          <ul>
+            <li>Просят деньги за «оформление оффера», «бронь места» или «гарантию работы»</li>
+            <li>Оффер пришёл с бесплатной почты, а не с домена компании, и компанию не найти в Google Maps</li>
+            <li>Предлагают «работу» через Telegram или WhatsApp без собеседования</li>
+            <li>Обещают $25+ в час за housekeeping или «удалённую» работу</li>
+            <li>Просят паспортные данные или банковскую карту до подписания оффера</li>
+          </ul>
+          <p>Всегда проверяй заведение в Google Maps: отзывы, фото, сайт. Кнопка «Посмотреть» показывает карту прямо здесь.</p>
+        </div>
+
+        <div class="card">
+          <h2>📅 Когда писать</h2>
+          <ul>
+            <li><b>Октябрь – январь</b>: главный сезон для писем работодателям на лето 2027</li>
+            <li><b>Февраль – март</b>: работодатели доукомплектовывают штат, напоминания работают хорошо</li>
+            <li>Чем раньше оффер, тем раньше подача документов и запись на визу</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Place modal -->
+  <dialog id="placeModal" class="modal">
+    <div class="modal-head">
+      <h3 id="pmTitle"></h3>
+      <button class="icon-btn" data-close aria-label="Закрыть">✕</button>
+    </div>
+    <div class="modal-body">
+      <iframe id="pmMap" title="Google Maps" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
+      <div id="pmInfo" class="pm-info"></div>
+    </div>
+  </dialog>
+
+  <!-- Compose modal -->
+  <dialog id="composeModal" class="modal">
+    <div class="modal-head">
+      <h3 id="cmTitle">Письмо</h3>
+      <button class="icon-btn" data-close aria-label="Закрыть">✕</button>
+    </div>
+    <div class="modal-body compose">
+      <div class="queue-info" id="cmQueue" hidden></div>
+      <div class="grid2">
+        <label class="field"><span>Шаблон</span><select id="cmTemplate"></select></label>
+        <label class="field" id="cmPositionField" hidden><span>Должность</span><input id="cmPosition" placeholder="e.g. Housekeeper"></label>
+      </div>
+      <label class="field"><span>Кому</span><input id="cmTo" type="text"></label>
+      <label class="field"><span>Тема</span><input id="cmSubject"></label>
+      <label class="field"><span>Текст</span><textarea id="cmBody" rows="14"></textarea></label>
+      <div class="row wrap">
+        <a class="btn primary" id="cmGmail" target="_blank" rel="noopener">Открыть в Gmail</a>
+        <a class="btn" id="cmMailto">Почтовое приложение</a>
+        <button class="btn" id="cmCopy" type="button">Копировать текст</button>
+        <span class="spacer"></span>
+        <button class="btn ghost" id="cmSkip" type="button" hidden>Пропустить</button>
+        <button class="btn" id="cmMarkSent" type="button">✓ Отметить как отправлено</button>
+      </div>
+      <p class="hint">Gmail откроется с готовым письмом. Проверь его и нажми «Отправить», потом вернись сюда и отметь отправку.</p>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

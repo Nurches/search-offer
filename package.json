@@ -1,0 +1,17 @@
+{
+  "name": "wt-job-finder",
+  "version": "1.0.0",
+  "description": "Find Summer Work and Travel USA employers by state and city, view them on Google Maps, and email them via Gmail.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test test/unit/*.test.js",
+    "test:e2e": "node test/e2e.mjs"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "license": "MIT"
+}
