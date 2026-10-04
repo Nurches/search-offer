@@ -24,14 +24,23 @@ export function encodeHeader(value) {
 
 const cleanHeader = (v) => String(v || '').replace(/[\r\n]+/g, ' ').trim();
 
+/** "Display Name" <email> with RFC 2047 encoding for non-ASCII names. */
+export function formatAddress(name, email) {
+  const n = cleanHeader(name).replace(/["\\]/g, '');
+  const e = cleanHeader(email);
+  if (!n) return e;
+  return /^[\x20-\x7e]*$/.test(n) ? `"${n}" <${e}>` : `${encodeHeader(n)} <${e}>`;
+}
+
 const wrap76 = (b64) => b64.replace(/(.{76})/g, '$1\r\n');
 
 /**
  * Builds the base64url "raw" RFC 822 message for users.messages.send.
  * attachments: [{ filename, mimeType, data }] where data is plain base64.
  */
-export function buildRawMessage({ to, cc, subject, body, inReplyTo, attachments = [] }) {
+export function buildRawMessage({ from, to, cc, subject, body, inReplyTo, attachments = [] }) {
   const headers = [
+    from?.email ? `From: ${formatAddress(from.name, from.email)}` : null,
     `To: ${cleanHeader(to)}`,
     cc ? `Cc: ${cleanHeader(cc)}` : null,
     `Subject: ${encodeHeader(cleanHeader(subject))}`,
@@ -96,6 +105,24 @@ export function analyzeThread(thread, ownAddresses = []) {
     };
   }
   return { replied: Boolean(reply), bounced: bounced && !reply, reply };
+}
+
+const SYSTEM_LOCAL = /^(postmaster|mailer-daemon|no-?reply|noreply|bounce[s]?|notifications?|mail-?delivery)/i;
+const ADDR_RE = /[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,24}/gi;
+
+/** Is this message a delivery-failure report (Gmail, Office 365, Exchange, Postfix…)? */
+export function isBounceMessage(msg) {
+  return BOUNCE_FROM.test(headerOf(msg, 'From')) || BOUNCE_SUBJECT.test(headerOf(msg, 'Subject'))
+    || Boolean(headerOf(msg, 'X-Failed-Recipients'));
+}
+
+/** Recipient addresses that failed, from X-Failed-Recipients and the report snippet. */
+export function bounceRecipients(msg, ownAddresses = []) {
+  const own = new Set(ownAddresses.filter(Boolean).map((e) => e.toLowerCase()));
+  const text = `${headerOf(msg, 'X-Failed-Recipients')} ${(msg.snippet || '').replace(/&#39;/g, "'")}`;
+  const found = (text.match(ADDR_RE) || []).map((e) => e.toLowerCase())
+    .filter((e) => !own.has(e) && !SYSTEM_LOCAL.test(e.split('@')[0]));
+  return [...new Set(found)];
 }
 
 export const gmailThreadUrl = (threadId, account) =>
@@ -198,8 +225,8 @@ export class GmailClient {
     return json;
   }
 
-  async send({ to, cc, subject, body, threadId, inReplyTo, attachments }) {
-    const raw = buildRawMessage({ to, cc, subject, body, inReplyTo, attachments });
+  async send({ from, to, cc, subject, body, threadId, inReplyTo, attachments }) {
+    const raw = buildRawMessage({ from, to, cc, subject, body, inReplyTo, attachments });
     const res = await this.api('/messages/send', { method: 'POST', body: JSON.stringify(threadId ? { raw, threadId } : { raw }) });
     return { id: res.id, threadId: res.threadId };
   }
@@ -207,6 +234,17 @@ export class GmailClient {
   async messageIdHeader(messageId) {
     const m = await this.api(`/messages/${messageId}?format=metadata&metadataHeaders=Message-ID`);
     return headerOf(m, 'Message-ID');
+  }
+
+  /** Delivery-failure reports from the last N days, with snippet and failure headers. */
+  async bounces({ days = 60, max = 100 } = {}) {
+    const q = encodeURIComponent(`from:(mailer-daemon OR postmaster) newer_than:${days}d`);
+    const list = await this.api(`/messages?q=${q}&maxResults=${max}`);
+    const out = [];
+    for (const { id } of list.messages || []) {
+      out.push(await this.api(`/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=X-Failed-Recipients`));
+    }
+    return out;
   }
 
   thread(threadId) {

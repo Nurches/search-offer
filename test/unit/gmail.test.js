@@ -73,3 +73,33 @@ test('friendly Google error messages', async () => {
   assert.match(friendlyGoogleError('Request had insufficient authentication scopes. PERMISSION_DENIED', 403), /галочки/);
   assert.equal(friendlyGoogleError('Something else', 500), 'Something else');
 });
+
+test('From header uses the profile name; bounce reports are parsed', async () => {
+  const { formatAddress, bounceRecipients, isBounceMessage } = await import('../../public/js/gmail.js');
+  const msg = fromB64Url(buildRawMessage({ from: { name: 'Nurassyl Example', email: 'me@gmail.com' }, to: 'a@b.com', subject: 'Hi', body: 'x' }));
+  assert.match(msg, /^From: "Nurassyl Example" <me@gmail\.com>\r\nTo: a@b\.com/);
+  assert.match(formatAddress('Алия', 'x@y.com'), /^=\?UTF-8\?B\?.+\?= <x@y\.com>$/);
+
+  const o365 = { id: 'n1', snippet: "Your message to cx_test@hotel-inn.com couldn&#39;t be delivered. cx_test wasn&#39;t found at hotel-inn.com. me Office 365 cx_test Action Required Recipient",
+    payload: { headers: [{ name: 'From', value: 'postmaster@hotelgroup.com' }, { name: 'Subject', value: 'Undeliverable: Summer 2027 Seasonal Jobs' }] } };
+  assert.equal(isBounceMessage(o365), true);
+  assert.deepEqual(bounceRecipients(o365, ['me@gmail.com']), ['cx_test@hotel-inn.com']);
+  const gmailNdr = { id: 'n2', snippet: "Address not found Your message wasn't delivered to jobs@old-motel.com because the address couldn't be found",
+    payload: { headers: [{ name: 'From', value: 'Mail Delivery Subsystem <mailer-daemon@googlemail.com>' }, { name: 'X-Failed-Recipients', value: 'jobs@old-motel.com' }] } };
+  assert.deepEqual(bounceRecipients(gmailNdr, ['me@gmail.com']), ['jobs@old-motel.com']);
+  assert.equal(isBounceMessage({ payload: { headers: [{ name: 'From', value: 'Kate <kate@hotel.com>' }, { name: 'Subject', value: 'Re: jobs' }] } }), false);
+});
+
+test('applyBounce: next address goes back to the queue, last address marks bounced', async () => {
+  const { applyBounce } = await import('../../public/js/store.js');
+  const lead = { emails: ['cx_old@inn.com', 'info@inn.com'], status: 'emailed', gmail: { threadId: 't1' } };
+  assert.equal(applyBounce(lead, 'CX_old@inn.com'), true);
+  assert.deepEqual([lead.emails, lead.badEmails, lead.status, lead.gmail], [['info@inn.com'], ['cx_old@inn.com'], 'new', null]);
+  assert.equal(applyBounce(lead, 'cx_old@inn.com'), false);
+  lead.status = 'emailed';
+  applyBounce(lead, 'info@inn.com');
+  assert.equal(lead.status, 'bounced');
+  const replied = { emails: ['a@x.com'], status: 'replied', reply: { from: 'x' } };
+  applyBounce(replied, 'a@x.com');
+  assert.equal(replied.status, 'replied');
+});

@@ -260,6 +260,11 @@ try {
       if (url.pathname.endsWith('/threads/t1')) {
         return json({ messages: [{ id: 'm1', labelIds: ['SENT'], payload: h('me@example.org') }, { id: 'r1', snippet: 'Hi! Can you do a Zoom call on Monday?', internalDate: String(Date.now()), payload: h('Kate <kate@boardwalkfries.test>') }] });
       }
+      if (url.pathname.endsWith('/messages') && url.searchParams.get('q')?.includes('mailer-daemon')) return json({ messages: [{ id: 'ndr1' }] });
+      if (url.pathname.endsWith('/messages/ndr1')) {
+        return json({ id: 'ndr1', snippet: "Your message to old@saltyscoops.test couldn't be delivered. old wasn't found at saltyscoops.test.",
+          payload: h('postmaster@saltyscoops.test', 'Undeliverable: Summer 2027 Seasonal Jobs for Two') });
+      }
       if (url.pathname.endsWith('/threads/t2')) {
         return json({ messages: [{ id: 'm2', labelIds: ['SENT'], payload: h('me@example.org') }, { id: 'b1', payload: h('Mail Delivery Subsystem <mailer-daemon@googlemail.com>', 'Delivery Status Notification (Failure)') }] });
       }
@@ -301,7 +306,7 @@ try {
     await g.click('#cpStart');
     await g.waitForFunction(() => /Готово: отправлено 2/.test(document.querySelector('#cpStatus').textContent), null, { timeout: 15000 });
     assert.equal(sent.length, 2);
-    assert.match(sent[0], /^To: jobs@boardwalkfries\.test\r\nCc: friend@example\.org\r\nSubject: Summer 2027 Seasonal Jobs for Two/);
+    assert.match(sent[0], /^From: "Test Student" <me@example\.org>\r\nTo: jobs@boardwalkfries\.test\r\nCc: friend@example\.org\r\nSubject: Summer 2027 Seasonal Jobs for Two/);
     const textPart = sent[0].split(/--wt_[a-z0-9]+/)[1];
     const body0 = Buffer.from(textPart.split('\r\n\r\n')[1].replace(/\s+/g, ''), 'base64').toString('utf8');
     assert.match(body0, /Dear Boardwalk Fries Hiring Team/);
@@ -312,7 +317,7 @@ try {
     assert.match(sent[0], /Content-Type: multipart\/mixed/);
     assert.match(sent[0], /filename="Resume_Test_Student\.pdf"/);
     assert.match(sent[0], /filename="Resume_Test_Friend\.pdf"/);
-    assert.match(sent[1], /^To: hr@oceanbreeze\.test/);
+    assert.match(sent[1], /^From: "Test Student" <me@example\.org>\r\nTo: hr@oceanbreeze\.test/);
     await g.screenshot({ path: path.join(outDir, 'campaign.png') });
     await g.click('#campaignModal [data-close]');
 
@@ -324,12 +329,21 @@ try {
     await g.click('#gmailBar [data-gm="test"]');
     await g.waitForFunction((n) => document.querySelector('#toast').textContent.includes('Тестовое письмо'), before);
     assert.equal(sent.length, before + 1);
-    assert.match(sent[before], /^To: me@example\.org\r\nSubject: =\?UTF-8\?B\?/);
+    assert.match(sent[before], /^From: "Test Student" <me@example\.org>\r\nTo: me@example\.org\r\nSubject: =\?UTF-8\?B\?/);
     assert.match(sent[before], /filename="Resume_Test_Friend\.pdf"/);
+    // Salty Scoops was emailed at an old address and has a second one
+    await g.evaluate(() => {
+      const l = [...window.wt.state.saved.values()].find((x) => x.name === 'Salty Scoops');
+      Object.assign(l, { emails: ['old@saltyscoops.test', 'hello@saltyscoops.test'], status: 'emailed', gmail: { threadId: 't9', messageId: 'm9' } });
+    });
     await g.click('#gmailBar [data-gm="check"]');
     await g.waitForFunction(() => [...window.wt.state.saved.values()].some((l) => l.reply));
+    await g.waitForFunction(() => [...window.wt.state.saved.values()].find((x) => x.name === 'Salty Scoops').status === 'new');
+    const salty = await g.evaluate(() => { const l = [...window.wt.state.saved.values()].find((x) => x.name === 'Salty Scoops'); return { emails: l.emails, bad: l.badEmails, gmail: l.gmail }; });
+    assert.deepEqual(salty, { emails: ['hello@saltyscoops.test'], bad: ['old@saltyscoops.test'], gmail: null });
     const st = await g.evaluate(() => Object.fromEntries([...window.wt.state.saved.values()].filter((l) => l.gmail).map((l) => [l.name, l.status])));
     assert.deepEqual(st, { 'Boardwalk Fries': 'replied', 'Ocean Breeze Hotel': 'bounced' });
+    assert.match(await g.locator('.trow', { hasText: 'Salty Scoops' }).textContent(), /old@saltyscoops\.test не существует/);
     const row = g.locator('.trow', { hasText: 'Boardwalk Fries' });
     assert.match(await row.locator('.reply-box').textContent(), /Новый ответ!.*Kate.*Zoom call on Monday/s);
     assert.match(await row.locator('a', { hasText: 'Переписка в Gmail' }).getAttribute('href'), /#all\/t1$/);

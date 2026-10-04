@@ -24,10 +24,11 @@ export const KEYS = {
   lastSearch: 'wt.lastSearch.v1',
   sendLog: 'wt.sendLog.v1',
   attachments: 'wt.attachments.v1',
+  bouncesSeen: 'wt.bouncesSeen.v1',
 };
 
 const LEAD_FIELDS = ['id', 'source', 'name', 'category', 'address', 'city', 'state', 'lat', 'lon', 'phone',
-  'website', 'emails', 'facebook', 'placeId', 'gmapsUrl', 'rating', 'ratingCount', 'fit', 'gmail', 'reply', 'replySeen', 'housing', 'housingCost', 'housingMentioned'];
+  'website', 'emails', 'facebook', 'placeId', 'gmapsUrl', 'rating', 'ratingCount', 'fit', 'gmail', 'reply', 'replySeen', 'housing', 'housingCost', 'housingMentioned', 'badEmails'];
 
 export function toSavedLead(lead) {
   const out = {};
@@ -39,6 +40,27 @@ export function toSavedLead(lead) {
   out.addedAt = lead.addedAt || new Date().toISOString();
   out.lastContactAt = lead.lastContactAt || null;
   return out;
+}
+
+/**
+ * Marks an address as non-existent. If the lead has another email, it goes back to "new" so the
+ * next campaign writes to the next address; otherwise it becomes "bounced". Returns true if changed.
+ */
+export function applyBounce(lead, badEmail, at = new Date().toISOString()) {
+  const bad = badEmail.toLowerCase();
+  if (!(lead.emails || []).includes(bad)) return false;
+  lead.emails = lead.emails.filter((e) => e !== bad);
+  lead.badEmails = [...new Set([...(lead.badEmails || []), bad])];
+  lead.history = [...(lead.history || []), { at, action: `bounced:${bad}`, via: 'gmail-check' }];
+  if (['emailed', 'followup', 'new', 'bounced'].includes(lead.status) && !lead.reply) {
+    if (lead.emails.length) {
+      lead.status = 'new';
+      lead.gmail = null; // eligible for the next campaign, to the next address
+    } else {
+      lead.status = 'bounced';
+    }
+  }
+  return true;
 }
 
 const STATUS_RANK = { new: 0, skip: 1, emailed: 2, bounced: 2, followup: 3, rejected: 4, replied: 5, interview: 6, offer: 7 };

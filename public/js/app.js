@@ -10,8 +10,8 @@ import {
   DEFAULT_PROFILE, DEFAULT_TEMPLATES, DEFAULT_TEMPLATES_PAIR, defaultTemplatesFor, partnerCc, SOLO_EXPERIENCE, PAIR_EXPERIENCE, STATUSES, STATUS_BY_ID, composeEmail, emailSearchUrl, gmailComposeUrl,
   googleMapsEmbedUrl, googleMapsSearchUrl, googleMapsUrl, jobBoardLinks, mailtoUrl, housingLinks,
 } from './outreach.js';
-import { GmailClient, analyzeThread, gmailThreadUrl } from './gmail.js';
-import { KEYS, download, leadsToCsv, load, mergeLeads as mergeSavedLeads, save, toSavedLead } from './store.js';
+import { GmailClient, analyzeThread, bounceRecipients, gmailThreadUrl, isBounceMessage } from './gmail.js';
+import { KEYS, applyBounce, download, leadsToCsv, load, mergeLeads as mergeSavedLeads, save, toSavedLead } from './store.js';
 
 // ---------- helpers ----------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -704,7 +704,8 @@ async function enrichLead(lead) {
     const res = await fetch(`${state.server.base}api/emails?url=${encodeURIComponent(lead.website)}`);
     const j = await res.json();
     if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
-    const found = j.emails || [];
+    const bad = new Set([...(lead.badEmails || []), ...(state.saved.get(lead.id)?.badEmails || [])]);
+    const found = (j.emails || []).filter((e) => !bad.has(e));
     lead.emails = [...new Set([...(lead.emails || []), ...found])];
     lead.enrichedAt = new Date().toISOString();
     const saved = state.saved.get(lead.id);
@@ -1057,6 +1058,7 @@ function renderTracker() {
         ${l.status === 'bounced' ? '<div class="lead-note">Письмо не дошло: адрес неверный или ящик закрыт. Найди другой email (сайт, Facebook) или позвони.</div>' : ''}
         <div class="lead-contacts">
           ${(l.emails || []).map((e) => `<span class="contact email">✉️ ${esc(e)}</span>`).join('') || '<span class="muted small">email нет</span>'}
+          ${(l.badEmails || []).map((e) => `<span class="contact bad" title="Адрес не существует (письмо вернулось)">✉️ <s>${esc(e)}</s> не существует</span>`).join('')}
           ${l.phone ? `<a class="contact" href="tel:${esc(l.phone.replace(/[^\d+]/g, ''))}">📞 ${esc(l.phone)}</a>` : ''}
           ${l.website ? `<a class="contact" href="${esc(l.website)}" target="_blank" rel="noopener">🌐 ${esc(hostOf(l.website))}</a>` : ''}
         </div>
@@ -1277,6 +1279,7 @@ const oauthClientId = () => (state.settings.oauthClientId || '').trim() || state
 const todayKey = () => new Date().toLocaleDateString('sv'); // YYYY-MM-DD, local day
 function sentToday() { const log = load(KEYS.sendLog, {}); return log.date === todayKey() ? log.count : 0; }
 function bumpSent() { save(KEYS.sendLog, { date: todayKey(), count: sentToday() + 1 }); }
+const senderFrom = () => ({ name: state.profile.name, email: gmail.email });
 const ownAddresses = () => [gmail.email, state.profile.email, state.profile.partnerEmail, state.profile.gmailAccount];
 
 async function connectGmail() {
@@ -1503,7 +1506,7 @@ async function sendLeadEmail(lead, templateId, override = null) {
     inReplyTo = await gmail.messageIdHeader(lead.gmail.messageId).catch(() => '');
     if (lead.gmail.subject) subject = /^re:/i.test(lead.gmail.subject) ? lead.gmail.subject : `Re: ${lead.gmail.subject}`;
   }
-  const r = await gmail.send({ to, cc, subject, body: composed.body, threadId, inReplyTo, attachments: state.attachments });
+  const r = await gmail.send({ from: senderFrom(), to, cc, subject, body: composed.body, threadId, inReplyTo, attachments: state.attachments });
   bumpSent();
   const now = new Date().toISOString();
   const saved = saveLead(lead);
@@ -1547,7 +1550,7 @@ async function sendTestEmail() {
     || { name: "Thrasher's French Fries", category: 'fastfood', city: 'Ocean City', state: 'MD' };
   const { subject, body } = composeEmail(tpls(), 'cold', state.profile, sample, { attachments: state.attachments.length });
   try {
-    await gmail.send({ to: gmail.email, subject: `[ТЕСТ] ${subject}`, body, attachments: state.attachments });
+    await gmail.send({ from: senderFrom(), to: gmail.email, subject: `[ТЕСТ] ${subject}`, body, attachments: state.attachments });
     toast(`Тестовое письмо отправлено на ${gmail.email}${state.attachments.length ? ` с ${state.attachments.length} вложениями` : ''}. Проверь «Входящие».`, 6000);
   } catch (e) {
     toast(`Не отправлено: ${e.message}`, 8000);
@@ -1586,6 +1589,8 @@ async function checkReplies({ quiet = false } = {}) {
     }
   };
   await Promise.all([worker(), worker(), worker(), worker()]);
+  const bounceResult = await scanBounces().catch(() => ({ bounced: 0, retry: 0 }));
+  bounced += bounceResult.bounced;
   state.lastReplyCheck = Date.now();
   persistLeads();
   renderTrackerIfVisible();
@@ -1597,6 +1602,33 @@ async function checkReplies({ quiet = false } = {}) {
   } else if (!quiet) {
     toast(bounced ? `Новых ответов нет. Не дошло писем: ${bounced}` : `Новых ответов нет (проверено ${leads.length})`);
   }
+  if (bounceResult.retry) toast(`📭 Неверных адресов: ${bounceResult.bounced}. ${bounceResult.retry} мест вернулись в очередь, у них есть другой email`, 7000);
+}
+
+/** Finds delivery-failure reports anywhere in the inbox (Office 365 sends them as separate emails). */
+async function scanBounces() {
+  const seen = new Set(load(KEYS.bouncesSeen, []));
+  const msgs = await gmail.bounces();
+  const byEmail = new Map();
+  for (const l of state.saved.values()) for (const e of l.emails || []) byEmail.set(e.toLowerCase(), l);
+  let bounced = 0;
+  let retry = 0;
+  for (const m of msgs) {
+    if (seen.has(m.id) || !isBounceMessage(m)) continue;
+    const recipients = bounceRecipients(m, ownAddresses());
+    // Remember a report only once it matched a contact (or names no address), so a report that
+    // arrives before the contact is saved is applied on a later check.
+    if (!recipients.length || recipients.some((a) => byEmail.has(a))) seen.add(m.id);
+    for (const addr of recipients) {
+      const lead = byEmail.get(addr);
+      if (!lead || !applyBounce(lead, addr)) continue;
+      bounced += 1;
+      if (lead.status === 'new') retry += 1;
+    }
+  }
+  save(KEYS.bouncesSeen, [...seen].slice(-500));
+  if (bounced) persistLeads();
+  return { bounced, retry };
 }
 
 function markRepliesSeen() {
