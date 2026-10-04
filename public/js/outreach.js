@@ -50,8 +50,8 @@ A little about me:
 
 Hiring a J-1 student is easy for employers: my sponsor arranges the visa, health insurance and SEVIS registration, there is no sponsorship fee for you, and J-1 students are generally exempt from FICA taxes (Social Security and Medicare). I would only need a job offer to submit to my sponsor.
 
-My resume: {{resumeLink}}
-I am available for a video interview (Zoom, Skype, WhatsApp) at any time convenient for you.
+{{resumeLine}}
+I am available for a video interview (Zoom, Google Meet or WhatsApp) at any time convenient for you.
 
 Thank you for your time and consideration. I look forward to hearing from you!
 
@@ -76,7 +76,7 @@ I will be in the United States on the J-1 Summer Work and Travel program through
 
 My sponsor handles the visa, insurance and SEVIS paperwork, and there is no sponsorship fee for employers.
 
-My resume: {{resumeLink}}
+{{resumeLine}}
 I would be glad to have a video interview at your convenience.
 
 Thank you for considering my application.
@@ -93,7 +93,7 @@ Best regards,
 
 I hope you are doing well. I am following up on my email about a seasonal position at {{business}} for summer 2027 ({{startDate}} – {{endDate}}).
 
-I am still very interested in working with your team in any entry-level role, and I am available for a video interview at any time. My resume: {{resumeLink}}
+I am still very interested in working with your team in any entry-level role, and I am available for a video interview at any time. {{resumeLine}}
 
 Thank you again for your time!
 
@@ -123,8 +123,8 @@ A little about us:
 
 Hiring J-1 students is easy for employers: our sponsor arranges the visas, health insurance and SEVIS registration, there is no sponsorship fee for you, and J-1 students are generally exempt from FICA taxes (Social Security and Medicare). We would only need a job offer for each of us to submit to our sponsor.
 
-Our resume: {{resumeLink}}
-We are available for a video interview (Zoom, Skype, WhatsApp) at any time convenient for you, together or separately.
+{{resumeLine}}
+We are available for a video interview (Zoom, Google Meet or WhatsApp) at any time convenient for you, together or separately.
 
 Thank you for your time and consideration. We look forward to hearing from you!
 
@@ -148,7 +148,7 @@ We will be in the United States on the J-1 Summer Work and Travel program throug
 
 Our sponsor handles the visa, insurance and SEVIS paperwork, and there is no sponsorship fee for employers. We would need a job offer for each of us.
 
-Our resume: {{resumeLink}}
+{{resumeLine}}
 We would be glad to have a video interview at your convenience.
 
 Thank you for considering our application.
@@ -164,7 +164,7 @@ Best regards,
 
 We hope you are doing well. We are following up on our email about seasonal positions at {{business}} for summer 2027 ({{startDate}} – {{endDate}}) for the two of us.
 
-We are still very interested in working with your team in any entry-level roles, and we are available for a video interview at any time. Our resume: {{resumeLink}}
+We are still very interested in working with your team in any entry-level roles, and we are available for a video interview at any time. {{resumeLine}}
 
 Thank you again for your time!
 
@@ -195,6 +195,17 @@ export function renderTemplate(tpl, vars) {
   return String(tpl).replace(/\{\{\s*(\w+)\s*\}\}/g, (_, k) => (vars[k] ?? '').toString());
 }
 
+/** "Our resumes are attached…" / "My resume: <link>" depending on attachments and link. */
+export function resumeLine(p, attachmentCount, pair) {
+  const link = (p.resumeLink || '').trim();
+  const many = attachmentCount > 1 || pair;
+  if (attachmentCount > 0) {
+    const att = pair ? `Our resume${many ? 's are' : ' is'} attached to this email` : `My resume${attachmentCount > 1 ? 's are' : ' is'} attached to this email`;
+    return link ? `${att} (also available here: ${link}).` : `${att}.`;
+  }
+  return `${pair ? 'Our resume' : 'My resume'}: ${link || '[link to resume]'}`;
+}
+
 function contactLine(name, phone, email) {
   const bits = [phone, email].filter(Boolean).join(', ');
   return bits ? `${name}: ${bits}` : '';
@@ -218,6 +229,7 @@ export function buildVars(profile, lead = {}, extra = {}) {
     city,
     positions: cat?.positions || 'housekeeping, food service or guest services',
     positionTitle: extra.positionTitle || cat?.positions?.split(',')[0]?.trim() || 'seasonal',
+    resumeLine: resumeLine(p, extra.attachments || 0, false),
     housingLine: p.housingNeed === 'yes'
       ? 'Housing is very important for me: do you provide employee housing, or could you help me find affordable housing close to work?'
       : '',
@@ -235,6 +247,7 @@ export function buildVars(profile, lead = {}, extra = {}) {
         : `${name} – ${p.english}, ${partnerName} – ${p.partnerEnglish}`,
       experience: p.experience === SOLO_EXPERIENCE ? PAIR_EXPERIENCE : p.experience,
       contacts: [contactLine(name, p.phone, p.email), contactLine(partnerName, p.partnerPhone, p.partnerEmail)].filter(Boolean).join('\n'),
+      resumeLine: resumeLine(p, extra.attachments || 0, true),
       housingLine: p.housingNeed === 'yes'
         ? 'Housing is very important for us: do you provide employee housing for two people, or could you help us find affordable housing close to work?'
         : '',

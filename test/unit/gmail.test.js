@@ -49,3 +49,18 @@ test('analyzeThread detects bounces', () => {
   assert.deepEqual([b.replied, b.bounced], [false, true]);
   assert.match(gmailThreadUrl('18c2f', 'me@gmail.com'), /authuser=me%40gmail\.com#all\/18c2f$/);
 });
+
+test('buildRawMessage attaches files as multipart/mixed', () => {
+  const pdf = Buffer.from('%PDF-1.4 test resume').toString('base64');
+  const msg = fromB64Url(buildRawMessage({
+    to: 'jobs@hotel.com', subject: 'Hi', body: 'See attached',
+    attachments: [{ filename: 'Resume_A.pdf', mimeType: 'application/pdf', data: pdf }, { filename: 'Resume_B.pdf', mimeType: 'application/pdf', data: pdf }],
+  }));
+  const boundary = msg.match(/Content-Type: multipart\/mixed; boundary="([^"]+)"/)[1];
+  const parts = msg.split(`--${boundary}`);
+  assert.equal(parts.length, 5); // preamble, text, 2 files, closing
+  assert.match(parts[1], /Content-Type: text\/plain; charset="UTF-8"/);
+  assert.match(parts[2], /Content-Disposition: attachment; filename="Resume_A\.pdf"/);
+  assert.equal(Buffer.from(parts[3].split('\r\n\r\n')[1].replace(/\s+/g, ''), 'base64').toString(), '%PDF-1.4 test resume');
+  assert.match(parts[4], /^--\s*$/);
+});

@@ -24,8 +24,13 @@ export function encodeHeader(value) {
 
 const cleanHeader = (v) => String(v || '').replace(/[\r\n]+/g, ' ').trim();
 
-/** Builds the base64url "raw" RFC 822 message for users.messages.send. */
-export function buildRawMessage({ to, cc, subject, body, inReplyTo }) {
+const wrap76 = (b64) => b64.replace(/(.{76})/g, '$1\r\n');
+
+/**
+ * Builds the base64url "raw" RFC 822 message for users.messages.send.
+ * attachments: [{ filename, mimeType, data }] where data is plain base64.
+ */
+export function buildRawMessage({ to, cc, subject, body, inReplyTo, attachments = [] }) {
   const headers = [
     `To: ${cleanHeader(to)}`,
     cc ? `Cc: ${cleanHeader(cc)}` : null,
@@ -33,11 +38,33 @@ export function buildRawMessage({ to, cc, subject, body, inReplyTo }) {
     inReplyTo ? `In-Reply-To: ${cleanHeader(inReplyTo)}` : null,
     inReplyTo ? `References: ${cleanHeader(inReplyTo)}` : null,
     'MIME-Version: 1.0',
+  ].filter(Boolean);
+  const textPart = [
     'Content-Type: text/plain; charset="UTF-8"',
     'Content-Transfer-Encoding: base64',
-  ].filter(Boolean);
-  const b64Body = utf8ToBase64(String(body || '').replace(/\r?\n/g, '\r\n')).replace(/(.{76})/g, '$1\r\n');
-  return toBase64Url(utf8ToBase64(`${headers.join('\r\n')}\r\n\r\n${b64Body}`));
+    '',
+    wrap76(utf8ToBase64(String(body || '').replace(/\r?\n/g, '\r\n'))),
+  ].join('\r\n');
+
+  let message;
+  if (!attachments.length) {
+    message = `${headers.join('\r\n')}\r\n${textPart}`;
+  } else {
+    const boundary = `wt_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+    const parts = [textPart, ...attachments.map((a) => {
+      const name = encodeHeader(cleanHeader(a.filename).replace(/"/g, ''));
+      return [
+        `Content-Type: ${cleanHeader(a.mimeType || 'application/octet-stream')}; name="${name}"`,
+        `Content-Disposition: attachment; filename="${name}"`,
+        'Content-Transfer-Encoding: base64',
+        '',
+        wrap76(String(a.data).replace(/\s+/g, '')),
+      ].join('\r\n');
+    })];
+    message = `${headers.join('\r\n')}\r\nContent-Type: multipart/mixed; boundary="${boundary}"\r\n\r\n`
+      + parts.map((p) => `--${boundary}\r\n${p}`).join('\r\n') + `\r\n--${boundary}--`;
+  }
+  return toBase64Url(utf8ToBase64(message));
 }
 
 export const headerOf = (msg, name) =>
@@ -150,8 +177,8 @@ export class GmailClient {
     return json;
   }
 
-  async send({ to, cc, subject, body, threadId, inReplyTo }) {
-    const raw = buildRawMessage({ to, cc, subject, body, inReplyTo });
+  async send({ to, cc, subject, body, threadId, inReplyTo, attachments }) {
+    const raw = buildRawMessage({ to, cc, subject, body, inReplyTo, attachments });
     const res = await this.api('/messages/send', { method: 'POST', body: JSON.stringify(threadId ? { raw, threadId } : { raw }) });
     return { id: res.id, threadId: res.threadId };
   }

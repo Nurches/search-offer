@@ -49,6 +49,7 @@ const state = {
     pair: { ...structuredClone(DEFAULT_TEMPLATES_PAIR), ...load(KEYS.templatesPair, {}) },
   },
   saved: new Map(load(KEYS.leads, []).map((l) => [l.id, l])),
+  attachments: load(KEYS.attachments, []), // [{ filename, mimeType, data(base64), size }]
   results: [],
   selected: new Set(),
   city: null, // {name, state, lat, lon}
@@ -797,7 +798,9 @@ function fillCompose() {
   const tid = $('#cmTemplate').value;
   $('#cmPositionField').hidden = tid !== 'vacancy';
   const extra = tid === 'vacancy' && $('#cmPosition').value.trim() ? { positionTitle: $('#cmPosition').value.trim() } : {};
-  const { subject, body } = composeEmail(tpls(), tid, state.profile, compose.lead, extra);
+  const { subject, body } = composeEmail(tpls(), tid, state.profile, compose.lead, { ...extra, attachments: apiAttachCount() });
+  $('#cmAttachNote').hidden = !apiAttachCount();
+  $('#cmAttachNote').textContent = `📎 «Отправить сразу» прикрепит резюме (${state.attachments.map((a) => a.filename).join(', ')}). В «Открыть в Gmail» вложения не переносятся: прикрепи PDF вручную.`;
   $('#cmSubject').value = subject;
   $('#cmBody').value = body;
   updateComposeLinks();
@@ -863,33 +866,102 @@ function initTracker() {
   });
   $('#exportJson').addEventListener('click', () => {
     download(`wt-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify({
-      version: 1, exportedAt: new Date().toISOString(), leads: [...state.saved.values()], profile: state.profile, templates: state.tpl,
+      version: 1, exportedAt: new Date().toISOString(), leads: [...state.saved.values()], profile: state.profile, templates: state.tpl, attachments: state.attachments,
     }, null, 2), 'application/json');
   });
   $('#importJson').addEventListener('change', async (e) => {
     const file = e.target.files[0];
-    if (!file) return;
-    try {
-      const data = JSON.parse(await file.text());
-      const leads = Array.isArray(data) ? data : data.leads || [];
-      let n = 0;
-      for (const l of leads) {
-        if (!l?.id || !l?.name) continue;
-        state.saved.set(l.id, mergeSavedLeads(state.saved.get(l.id), l));
-        n += 1;
-      }
-      if (data.profile) { state.profile = { ...DEFAULT_PROFILE, ...data.profile }; save(KEYS.profile, state.profile); fillProfileForm(); }
-      if (data.templates) {
-        const t = data.templates.solo || data.templates.pair ? data.templates : { solo: data.templates };
-        if (t.solo) { state.tpl.solo = { ...structuredClone(DEFAULT_TEMPLATES), ...t.solo }; save(KEYS.templates, state.tpl.solo); }
-        if (t.pair) { state.tpl.pair = { ...structuredClone(DEFAULT_TEMPLATES_PAIR), ...t.pair }; save(KEYS.templatesPair, state.tpl.pair); }
-      }
-      persistLeads();
-      renderTracker();
-      toast(`Импортировано контактов: ${n}`);
-    } catch (err) {
-      toast(`Ошибка импорта: ${err.message}`);
+    if (file) await importBackupFile(file);
+    e.target.value = '';
+  });
+}
+
+/** Imports a backup / profile JSON: leads (merged), profile, templates, resume attachments. */
+async function importBackupFile(file) {
+  try {
+    const data = JSON.parse(await file.text());
+    const leads = Array.isArray(data) ? data : data.leads || [];
+    let n = 0;
+    for (const l of leads) {
+      if (!l?.id || !l?.name) continue;
+      state.saved.set(l.id, mergeSavedLeads(state.saved.get(l.id), l));
+      n += 1;
     }
+    const parts = [];
+    if (data.profile) {
+      const prevMode = mode();
+      state.profile = { ...DEFAULT_PROFILE, ...data.profile };
+      save(KEYS.profile, state.profile);
+      fillProfileForm();
+      if (prevMode !== mode()) initComposeTemplates();
+      parts.push('профиль');
+    }
+    if (data.templates) {
+      const t = data.templates.solo || data.templates.pair ? data.templates : { solo: data.templates };
+      if (t.solo) { state.tpl.solo = { ...structuredClone(DEFAULT_TEMPLATES), ...t.solo }; save(KEYS.templates, state.tpl.solo); }
+      if (t.pair) { state.tpl.pair = { ...structuredClone(DEFAULT_TEMPLATES_PAIR), ...t.pair }; save(KEYS.templatesPair, state.tpl.pair); }
+      parts.push('шаблоны');
+    }
+    if (Array.isArray(data.attachments)) {
+      state.attachments = data.attachments.filter((a) => a?.filename && a?.data);
+      save(KEYS.attachments, state.attachments);
+      renderAttachments();
+      parts.push(`резюме: ${state.attachments.length}`);
+    }
+    if (n) parts.push(`контактов: ${n}`);
+    persistLeads();
+    renderTrackerIfVisible();
+    renderTemplatePreview();
+    toast(`Импортировано: ${parts.join(', ') || 'ничего'}`, 4000);
+  } catch (err) {
+    toast(`Ошибка импорта: ${err.message}`);
+  }
+}
+
+// ---------- resume attachments ----------
+const MAX_ATTACH_BYTES = 1.5 * 1024 * 1024;
+const apiAttachCount = () => (oauthClientId() ? state.attachments.length : 0);
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1] || '');
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(file);
+  });
+}
+
+function renderAttachments() {
+  const box = $('#attachList');
+  if (!box) return;
+  box.innerHTML = state.attachments.length
+    ? state.attachments.map((a, i) => `<span class="contact">📎 ${esc(a.filename)} <span class="muted small">${Math.max(1, Math.round((a.size || a.data.length * 0.75) / 1024))} КБ</span> <button type="button" class="icon-btn sm" data-rm="${i}" title="Убрать">✕</button></span>`).join('')
+    : '<span class="muted small">Резюме не добавлены.</span>';
+}
+
+function initAttachments() {
+  renderAttachments();
+  $('#attachList').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-rm]');
+    if (!b) return;
+    state.attachments.splice(Number(b.dataset.rm), 1);
+    save(KEYS.attachments, state.attachments);
+    renderAttachments();
+    renderTemplatePreview();
+  });
+  $('#attachInput').addEventListener('change', async (e) => {
+    for (const f of e.target.files) {
+      if (f.size > MAX_ATTACH_BYTES) { toast(`${f.name}: больше 1,5 МБ. Сожми PDF или дай ссылку на Google Drive`, 6000); continue; }
+      state.attachments.push({ filename: f.name, mimeType: f.type || 'application/pdf', data: await fileToBase64(f), size: f.size });
+    }
+    save(KEYS.attachments, state.attachments);
+    renderAttachments();
+    renderTemplatePreview();
+    e.target.value = '';
+  });
+  $('#profileImport').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (file) await importBackupFile(file);
     e.target.value = '';
   });
 }
@@ -1101,7 +1173,7 @@ function renderTemplatePreview() {
   const sample = state.results.find((l) => l.emails?.length) || state.results[0]
     || { name: "Thrasher's French Fries", category: 'fastfood', city: 'Ocean City', state: 'MD' };
   const tmp = { preview: { subject: $('#tplSubject').value, body: $('#tplBody').value } };
-  const { subject, body } = composeEmail(tmp, 'preview', state.profile, sample);
+  const { subject, body } = composeEmail(tmp, 'preview', state.profile, sample, { attachments: apiAttachCount() });
   $('#tplPreview').innerHTML = `<div class="pv-subject"><b>Тема:</b> ${esc(subject)}</div><pre>${esc(body)}</pre>`;
 }
 
@@ -1322,7 +1394,7 @@ function renderCampaignSummary() {
 function renderCampaignPreview() {
   const lead = state.saved.get(camp.ids[0]);
   if (!lead) { $('#cpPreview').innerHTML = '<span class="muted">Некому отправлять.</span>'; return; }
-  const { subject, body } = composeEmail(tpls(), $('#cpTemplate').value, state.profile, lead);
+  const { subject, body } = composeEmail(tpls(), $('#cpTemplate').value, state.profile, lead, { attachments: state.attachments.length });
   const cc = partnerCc(state.profile);
   $('#cpPreview').innerHTML = `<div class="pv-subject"><b>Кому:</b> ${esc(lead.emails[0])}${cc ? ` · <b>Копия:</b> ${esc(cc)}` : ''}</div><div class="pv-subject"><b>Тема:</b> ${esc(subject)}</div><pre>${esc(body)}</pre>`;
 }
@@ -1349,7 +1421,7 @@ function campaignLog(text, err = false) {
 async function startCampaign() {
   if (!camp.ids.length) { toast('Некому отправлять'); return; }
   if (!$('#cpConfirm').checked) { toast('Поставь галочку, что проверил(а) письмо'); return; }
-  const first = composeEmail(tpls(), $('#cpTemplate').value, state.profile, state.saved.get(camp.ids[0]));
+  const first = composeEmail(tpls(), $('#cpTemplate').value, state.profile, state.saved.get(camp.ids[0]), { attachments: state.attachments.length });
   const missing = [...new Set(`${first.subject}\n${first.body}`.match(/\[(Your Name|University|2nd-year|link to resume|Friend's Name)\]/g) || [])];
   if (missing.length) { toast(`В письме не заполнено: ${missing.join(', ')}. Заполни во вкладке «Письмо и профиль»`, 7000); return; }
   if (!gmail.connected && !(await connectGmail())) return;
@@ -1410,7 +1482,7 @@ async function runCampaign() {
 
 /** Sends one email through the Gmail API and records the thread on the lead. */
 async function sendLeadEmail(lead, templateId, override = null) {
-  const composed = override || composeEmail(tpls(), templateId, state.profile, lead);
+  const composed = override || composeEmail(tpls(), templateId, state.profile, lead, { attachments: state.attachments.length });
   const to = override?.to || lead.emails[0];
   const cc = override ? override.cc : partnerCc(state.profile);
   let { subject } = composed;
@@ -1421,7 +1493,7 @@ async function sendLeadEmail(lead, templateId, override = null) {
     inReplyTo = await gmail.messageIdHeader(lead.gmail.messageId).catch(() => '');
     if (lead.gmail.subject) subject = /^re:/i.test(lead.gmail.subject) ? lead.gmail.subject : `Re: ${lead.gmail.subject}`;
   }
-  const r = await gmail.send({ to, cc, subject, body: composed.body, threadId, inReplyTo });
+  const r = await gmail.send({ to, cc, subject, body: composed.body, threadId, inReplyTo, attachments: state.attachments });
   bumpSent();
   const now = new Date().toISOString();
   const saved = saveLead(lead);
@@ -1523,6 +1595,7 @@ function boot() {
   initSettings();
   initHotspots();
   initGmail();
+  initAttachments();
   initTabs();
   persistLeads();
   detectServer();

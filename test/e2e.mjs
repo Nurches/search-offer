@@ -262,6 +262,20 @@ try {
 
     await g.goto(base);
     await g.waitForFunction(() => window.wt?.state.server.oauthClientId);
+    // Import a profile file with resumes (what the user gets from Claude)
+    const importFile = path.join(outDir, 'profile-import.json');
+    fs.writeFileSync(importFile, JSON.stringify({
+      version: 1,
+      profile: { searchMode: 'pair', name: 'Test Student', partnerName: 'Test Friend', partnerEmail: 'friend@example.org', university: 'Test University', studyYear: '3rd-year', english: 'B1+', partnerEnglish: 'B2', startDate: 'June 1, 2027', endDate: 'August 31, 2027', experience: 'We have three summer seasons of restaurant experience.' },
+      attachments: [{ filename: 'Resume_Test_Student.pdf', mimeType: 'application/pdf', data: Buffer.from('%PDF-1.4 a').toString('base64'), size: 10 },
+        { filename: 'Resume_Test_Friend.pdf', mimeType: 'application/pdf', data: Buffer.from('%PDF-1.4 b').toString('base64'), size: 10 }],
+    }));
+    await g.click('.tab[data-tab="letter"]');
+    await g.setInputFiles('#profileImport', importFile);
+    await g.waitForFunction(() => document.querySelector('#attachList').textContent.includes('Resume_Test_Friend.pdf'));
+    assert.equal(await g.inputValue('#profileForm [name="partnerEnglish"]'), 'B2');
+    assert.equal(await g.inputValue('#profileForm [name="endDate"]'), 'August 31, 2027');
+    assert.match(await g.textContent('#tplPreview'), /Our resumes are attached to this email\./);
     await g.click('.tab[data-tab="hotspots"]');
     await g.fill('#hsSearch', 'Ocean City');
     await g.locator('.hs', { hasText: 'Ocean City, MD' }).locator('[data-hs]').click();
@@ -282,10 +296,16 @@ try {
     await g.waitForFunction(() => /Готово: отправлено 2/.test(document.querySelector('#cpStatus').textContent), null, { timeout: 15000 });
     assert.equal(sent.length, 2);
     assert.match(sent[0], /^To: jobs@boardwalkfries\.test\r\nCc: friend@example\.org\r\nSubject: Summer 2027 Seasonal Jobs for Two/);
-    const body0 = Buffer.from(sent[0].split('\r\n\r\n')[1].replace(/\r\n/g, ''), 'base64').toString('utf8');
+    const textPart = sent[0].split(/--wt_[a-z0-9]+/)[1];
+    const body0 = Buffer.from(textPart.split('\r\n\r\n')[1].replace(/\s+/g, ''), 'base64').toString('utf8');
     assert.match(body0, /Dear Boardwalk Fries Hiring Team/);
     assert.match(body0, /Test Student and Test Friend/);
+    assert.match(body0, /Our resumes are attached to this email\./);
+    assert.match(body0, /Test Student – B1\+, Test Friend – B2/);
     assert.doesNotMatch(body0, /\[(University|Your Name|link to resume)\]/);
+    assert.match(sent[0], /Content-Type: multipart\/mixed/);
+    assert.match(sent[0], /filename="Resume_Test_Student\.pdf"/);
+    assert.match(sent[0], /filename="Resume_Test_Friend\.pdf"/);
     assert.match(sent[1], /^To: hr@oceanbreeze\.test/);
     await g.screenshot({ path: path.join(outDir, 'campaign.png') });
     await g.click('#campaignModal [data-close]');

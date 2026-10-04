@@ -178,7 +178,10 @@
     <section class="panel" id="tab-letter">
       <div class="letter-layout">
         <form class="card" id="profileForm">
-          <h2>Мой профиль</h2>
+          <div class="row wrap" style="justify-content:space-between">
+            <h2 style="margin:0">Мой профиль</h2>
+            <label class="btn ghost sm file-btn">📥 Импорт профиля из файла<input type="file" id="profileImport" accept="application/json,.json" hidden></label>
+          </div>
           <p class="hint">Данные подставляются в письма. Хранятся только в этом браузере.</p>
           <div class="field">
             <span>Ищу работу</span>
@@ -223,7 +226,13 @@
             <p class="hint">Письма уходят от твоего Gmail, но пишутся от «we», подписаны обоими именами, с контактами обоих. Работодателю сразу понятно, что нужно 2 места.</p>
           </fieldset>
           <label class="field"><span id="experienceLabel">Опыт / о себе (1–2 предложения на английском)</span><textarea name="experience" rows="3"></textarea></label>
-          <label class="field"><span id="resumeLabel">Ссылка на резюме (Google Drive, «доступ по ссылке»)</span><input name="resumeLink" type="url" placeholder="https://drive.google.com/..."></label>
+          <label class="field"><span id="resumeLabel">Ссылка на резюме (Google Drive, «доступ по ссылке»)</span><input name="resumeLink" type="url" placeholder="https://drive.google.com/... (необязательно, если резюме прикреплены)"></label>
+          <div class="field">
+            <span>📎 Резюме для вложения (PDF, до 1,5 МБ)</span>
+            <div class="attach-list" id="attachList"></div>
+            <label class="btn sm file-btn" style="align-self:flex-start">➕ Добавить PDF<input type="file" id="attachInput" accept=".pdf,application/pdf,.doc,.docx" multiple hidden></label>
+            <p class="hint">Прикрепляются к каждому письму, которое сайт отправляет через Gmail API («Отправить всем», «Отправить сразу»). Хранятся только в этом браузере.</p>
+          </div>
           <label class="field"><span>Gmail-аккаунт для отправки (если в браузере их несколько)</span><input name="gmailAccount" type="email" placeholder="you@gmail.com"></label>
           <p class="hint">Gmail через ссылку не умеет прикреплять файлы, поэтому резюме идёт ссылкой. Открой доступ «Все, у кого есть ссылка».</p>
           <div class="row"><button class="btn primary" type="submit">Сохранить профиль</button><span class="saved" id="profileSaved" hidden>Сохранено ✓</span></div>
@@ -405,6 +414,7 @@
         <button class="btn ghost" id="cmSkip" type="button" hidden>Пропустить</button>
         <button class="btn" id="cmMarkSent" type="button">✓ Отметить как отправлено</button>
       </div>
+      <p class="hint" id="cmAttachNote" hidden></p>
       <p class="hint">Gmail откроется с готовым письмом. Проверь его и нажми «Отправить», потом вернись сюда и отметь отправку.</p>
     </div>
   </dialog>

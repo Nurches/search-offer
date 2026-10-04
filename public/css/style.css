@@ -279,6 +279,8 @@ body.no-scroll { overflow: hidden; }
 .trow-edit select[data-act="housing"] { grid-column: 1; }
 .trow-edit input[data-act="housingCost"] { grid-column: 2 / span 2; }
 .pm-sub { margin: 1rem 0 .4rem; }
+.attach-list { display: flex; flex-wrap: wrap; gap: .4rem; margin: .2rem 0 .4rem; }
+.attach-list .icon-btn { font-size: .8rem; padding: 0 .3rem; }
 .trow-actions { align-content: flex-start; }
 
 /* letter */

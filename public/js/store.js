@@ -23,6 +23,7 @@ export const KEYS = {
   settings: 'wt.settings.v1',
   lastSearch: 'wt.lastSearch.v1',
   sendLog: 'wt.sendLog.v1',
+  attachments: 'wt.attachments.v1',
 };
 
 const LEAD_FIELDS = ['id', 'source', 'name', 'category', 'address', 'city', 'state', 'lat', 'lon', 'phone',
