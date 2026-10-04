@@ -205,6 +205,12 @@ try {
   await page.waitForSelector('#citySuggest li:has-text("Fairbanks")');
   await page.locator('#citySuggest li', { hasText: 'Fairbanks' }).click();
   assert.equal(await page.inputValue('#cityInput'), 'Fairbanks');
+  // Re-opening the field with a picked city lists the whole state again, not just that city
+  await page.click('#mapFullBtn'); await page.click('#mapFullBtn'); // move focus away and back
+  await page.click('#cityInput');
+  await page.waitForSelector('#citySuggest li:has-text("Anchorage")');
+  assert.match(await page.textContent('#citySuggest'), /всего 3 мест в штате/);
+  await page.keyboard.press('Escape');
   await page.click('#searchBtn');
   await page.waitForSelector('.lead');
   // typed name without picking also resolves from the state list (no geocoder call)

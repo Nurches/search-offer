@@ -256,8 +256,11 @@ const cityLoads = new Map();
 let cityPickerRefresh = () => {};
 const CITY_CACHE_DAYS = 30;
 
+const cityLoadFailedAt = new Map();
+
 async function loadStateCities(code) {
   if (!code || stateCities.has(code)) return stateCities.get(code);
+  if (Date.now() - (cityLoadFailedAt.get(code) || 0) < 20_000) return [];
   if (cityLoads.has(code)) return cityLoads.get(code);
   const key = `wt.cities.${code}.v1`;
   const cached = load(key, null);
@@ -274,7 +277,7 @@ async function loadStateCities(code) {
       save(key, { at: Date.now(), list: list.map((c) => [c.name, c.lat, c.lon, c.pop]) });
       return list;
     } catch {
-      stateCities.set(code, []);
+      cityLoadFailedAt.set(code, Date.now());
       return [];
     } finally {
       cityLoads.delete(code);
@@ -324,29 +327,34 @@ function initSearchForm() {
     const hs = HOTSPOTS.filter((h) => (!st || h.state === st) && (!q || h.name.toLowerCase().includes(q.toLowerCase())))
       .map((h) => ({ name: h.name, state: h.state, lat: h.lat, lon: h.lon, label: `🏖️ ${h.name}, ${h.state} · W&T курорт${h.housing === 'employer' ? ' · 🏠' : ''}` }));
     const list = st ? (stateCities.get(st) || []) : [];
-    const cities = matchCities(list, q, 14)
+    const cities = matchCities(list, q, q ? 14 : 40)
       .filter((c) => !hs.some((h) => h.name.toLowerCase() === c.name.toLowerCase()))
       .map((c) => ({ ...c, label: `${c.name}, ${c.state}${c.pop ? ` · ${c.pop.toLocaleString('ru-RU')} жит.` : ''}` }));
     return [...hs, ...cities];
   };
 
   const showSuggest = debounce(async () => {
-    const q = cityInput.value.trim();
+    const typed = cityInput.value.trim();
+    // Input still shows the picked city: list the whole state instead of filtering to that one name.
+    const q = state.city && typed === state.city.name ? '' : typed;
     suggAbort?.abort();
     const st = stateSel.value;
     if (!st && q.length < 2) { renderSuggest([], { hint: 'Сначала выбери штат — покажу его города.' }); return; }
+    if (st && !stateCities.has(st)) loadStateCities(st);
     const local = localCityMatches(q);
-    const loadingList = st && !stateCities.has(st);
-    renderSuggest(local, { loading: loadingList || q.length >= 2, title: q ? '' : 'Популярные места штата' });
+    const loadingList = st && !stateCities.has(st) && cityLoads.has(st);
+    const total = stateCities.get(st)?.length || 0;
+    const title = q ? '' : (total ? `Курорты и крупные города · всего ${total} мест в штате, начни печатать для поиска` : 'W&T курорты штата');
+    renderSuggest(local, { loading: loadingList || q.length >= 2, title });
     if (q.length < 2) return;
     suggAbort = new AbortController();
     try {
       const remote = await suggestCities(q, { stateCode: st, signal: suggAbort.signal });
-      const merged = [...localCityMatches(cityInput.value.trim())];
+      const merged = [...localCityMatches(q)];
       for (const r of remote) if (!merged.some((m) => m.name.toLowerCase() === r.name.toLowerCase() && m.state === r.state)) merged.push(r);
       renderSuggest(merged.slice(0, 16), {});
     } catch (e) {
-      if (e.name !== 'AbortError') renderSuggest(localCityMatches(cityInput.value.trim()), {});
+      if (e.name !== 'AbortError') renderSuggest(localCityMatches(q), {});
     }
   }, 200);
   showSuggest.refresh = () => { if (document.activeElement === cityInput) showSuggest(); };
@@ -372,7 +380,7 @@ function initSearchForm() {
   }
 
   cityInput.addEventListener('input', () => { state.city = null; showSuggest(); });
-  cityInput.addEventListener('focus', () => showSuggest());
+  cityInput.addEventListener('focus', () => { if (state.city && cityInput.value.trim() === state.city.name) cityInput.select(); showSuggest(); });
   cityInput.addEventListener('blur', () => setTimeout(() => { sugg.hidden = true; }, 150));
   cityInput.addEventListener('keydown', (e) => {
     const lis = $$('li[data-i]', sugg);
