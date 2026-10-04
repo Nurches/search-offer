@@ -176,10 +176,10 @@ body.no-scroll { overflow: hidden; }
   position: absolute; top: 4.1rem; left: 0; right: 0; z-index: 50;
   list-style: none; margin: 0; padding: .25rem;
   background: var(--card); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow);
-  max-height: 260px; overflow: auto;
+  max-height: 340px; overflow: auto;
 }
 .suggest li { padding: .45rem .6rem; border-radius: 8px; cursor: pointer; font-size: .9rem; }
-.suggest li:hover { background: var(--primary-soft); }
+.suggest li:hover, .suggest li.active { background: var(--primary-soft); }
 .suggest li.muted { cursor: default; }
 .chips { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .4rem; align-items: center; }
 .chip {
@@ -276,6 +276,9 @@ body.no-scroll { overflow: hidden; }
 .trow { flex-wrap: wrap; }
 .trow.due { box-shadow: 0 0 0 2px var(--warn-soft); }
 .trow-edit { display: grid; grid-template-columns: 200px 1fr 1.6fr; gap: .4rem; }
+.trow-edit select[data-act="housing"] { grid-column: 1; }
+.trow-edit input[data-act="housingCost"] { grid-column: 2 / span 2; }
+.pm-sub { margin: 1rem 0 .4rem; }
 .trow-actions { align-content: flex-start; }
 
 /* letter */
@@ -342,6 +345,7 @@ h3.bad { color: var(--bad); }
   .search-form { position: static; max-height: none; }
   .letter-layout { grid-template-columns: 1fr; }
   .trow-edit { grid-template-columns: 1fr; }
+  .trow-edit select[data-act="housing"], .trow-edit input[data-act="housingCost"] { grid-column: auto; }
 }
 @media (max-width: 640px) {
   main { padding: .75rem 16px; }

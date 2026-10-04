@@ -157,3 +157,38 @@ test('merging a friend\'s backup keeps the furthest status and all history', asy
   assert.equal(m.addedAt, '2026-10-03T00:00:00Z');
   assert.equal(mergeLeads(hers, mine).status, 'replied');
 });
+
+test('state city list: query, parsing and matching', async () => {
+  const { buildCityListQuery, parseCityList, matchCities } = await import('../../public/js/search.js');
+  const q = buildCityListQuery('AK');
+  assert.match(q, /area\["ISO3166-2"="US-AK"\]/);
+  assert.match(q, /node\["place"~"\^\(city\|town\|village\)\$"\]\["name"\]\(area\.st\);/);
+  const list = parseCityList({ elements: [
+    { type: 'node', lat: 61.2, lon: -149.9, tags: { name: 'Anchorage', place: 'city', population: '291,247' } },
+    { type: 'node', lat: 64.8, lon: -147.7, tags: { name: 'Fairbanks', place: 'city', population: '32515' } },
+    { type: 'node', lat: 60.1, lon: -149.4, tags: { name: 'Seward', place: 'town', population: '2717' } },
+    { type: 'node', lat: 59.6, lon: -151.5, tags: { name: 'Homer', place: 'town' } },
+    { type: 'node', lat: 59.6, lon: -151.5, tags: { name: 'Homer', place: 'village' } },
+    { type: 'node', tags: { name: 'NoCoords', place: 'town' } },
+  ] }, 'AK');
+  assert.deepEqual(list.map((c) => c.name), ['Anchorage', 'Fairbanks', 'Seward', 'Homer']);
+  assert.equal(list[0].pop, 291247);
+  assert.deepEqual(matchCities(list, 'an').map((c) => c.name), ['Anchorage', 'Fairbanks']);
+  assert.deepEqual(matchCities(list, 'SEW').map((c) => c.name), ['Seward']);
+  assert.equal(matchCities(list, '', 2).length, 2);
+});
+
+test('housing: question in emails can be switched off, housing links', async () => {
+  const { DEFAULT_TEMPLATES_PAIR, housingLinks } = await import('../../public/js/outreach.js');
+  const lead = { name: 'Sea Hotel', category: 'lodging', city: 'Ocean City', state: 'MD', address: '1 Boardwalk, Ocean City, MD' };
+  const pair = composeEmail(DEFAULT_TEMPLATES_PAIR, 'cold', { searchMode: 'pair', name: 'A', partnerName: 'B' }, lead).body;
+  assert.match(pair, /employee housing for two people/);
+  const solo = composeEmail(DEFAULT_TEMPLATES, 'cold', { searchMode: 'solo', name: 'A' }, lead).body;
+  assert.match(solo, /do you provide employee housing, or could you help me/);
+  const off = composeEmail(DEFAULT_TEMPLATES, 'cold', { searchMode: 'solo', name: 'A', housingNeed: 'no' }, lead).body;
+  assert.doesNotMatch(off, /housing, or could/);
+  assert.doesNotMatch(off, /\n{3,}/);
+  const links = housingLinks(lead);
+  assert.ok(links.length >= 5);
+  assert.match(links[0].url, /google\.com\/maps\/search\/apartments%20for%20rent%20near%201%20Boardwalk/);
+});

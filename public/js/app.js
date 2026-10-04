@@ -1,11 +1,14 @@
-import { CATEGORIES, CATEGORY_BY_ID, HOTSPOTS, HOTSPOT_TYPES, STATES, STATE_BY_CODE } from './data.js';
+import {
+  CATEGORIES, CATEGORY_BY_ID, HOTSPOTS, HOTSPOT_TYPES, HOUSING_INFO, HOUSING_LIKELY_CATEGORIES, STATES, STATE_BY_CODE,
+} from './data.js';
 import {
   buildOverpassQuery, geocodeCity, parseOverpass, runOverpass, searchGooglePlaces, sortLeads, suggestCities,
+  buildCityListQuery, parseCityList, matchCities,
   assessFit, haversineKm,
 } from './search.js';
 import {
   DEFAULT_PROFILE, DEFAULT_TEMPLATES, DEFAULT_TEMPLATES_PAIR, defaultTemplatesFor, partnerCc, SOLO_EXPERIENCE, PAIR_EXPERIENCE, STATUSES, STATUS_BY_ID, composeEmail, emailSearchUrl, gmailComposeUrl,
-  googleMapsEmbedUrl, googleMapsSearchUrl, googleMapsUrl, jobBoardLinks, mailtoUrl,
+  googleMapsEmbedUrl, googleMapsSearchUrl, googleMapsUrl, jobBoardLinks, mailtoUrl, housingLinks,
 } from './outreach.js';
 import { GmailClient, analyzeThread, gmailThreadUrl } from './gmail.js';
 import { KEYS, download, leadsToCsv, load, mergeLeads as mergeSavedLeads, save, toSavedLead } from './store.js';
@@ -16,6 +19,13 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const FOLLOWUP_DAYS = 7;
+const HOUSING_STATUS = {
+  provided: { label: '🏠 Даёт жильё', color: 'green' },
+  help: { label: '🏠 Помогает найти', color: 'amber' },
+  none: { label: '🔑 Жильё ищем сами', color: 'gray' },
+};
+const HOUSING_RE = /\b(housing|dorm(itor(y|ies))?|apartments?|accommodations?|lodging for (staff|employees)|room and board|rent)\b/i;
+const hotspotFor = (city, st) => HOTSPOTS.find((h) => h.state === st && city && h.name.toLowerCase() === String(city).toLowerCase());
 const FIT_LABEL = { ok: '✓ Подходит', check: '⚠ Уточнить', bad: '✕ Не подходит' };
 
 function toast(msg, ms = 2600) {
@@ -239,6 +249,41 @@ function showCenter(lat, lon, radiusM) {
   if (radiusM) L.circle([lat, lon], { radius: radiusM, color: '#2563eb', weight: 1, fillOpacity: 0.04 }).addTo(centerLayer);
 }
 
+// ---------- state city lists (city picker) ----------
+const stateCities = new Map();
+const cityLoads = new Map();
+let cityPickerRefresh = () => {};
+const CITY_CACHE_DAYS = 30;
+
+async function loadStateCities(code) {
+  if (!code || stateCities.has(code)) return stateCities.get(code);
+  if (cityLoads.has(code)) return cityLoads.get(code);
+  const key = `wt.cities.${code}.v1`;
+  const cached = load(key, null);
+  if (cached?.list && Date.now() - cached.at < CITY_CACHE_DAYS * 864e5) {
+    const list = cached.list.map(([name, lat, lon, pop]) => ({ name, state: code, lat, lon, pop }));
+    stateCities.set(code, list);
+    return list;
+  }
+  const p = (async () => {
+    try {
+      const json = await runOverpass(buildCityListQuery(code), { apiBase: state.server.ok ? state.server.base : null });
+      const list = parseCityList(json, code);
+      stateCities.set(code, list);
+      save(key, { at: Date.now(), list: list.map((c) => [c.name, c.lat, c.lon, c.pop]) });
+      return list;
+    } catch {
+      stateCities.set(code, []);
+      return [];
+    } finally {
+      cityLoads.delete(code);
+      cityPickerRefresh();
+    }
+  })();
+  cityLoads.set(code, p);
+  return p;
+}
+
 // ---------- search form ----------
 function initSearchForm() {
   const stateSel = $('#stateSelect');
@@ -264,45 +309,91 @@ function initSearchForm() {
     renderHotspotChips();
     renderLaunchers();
     if (st && map && !state.city) map.setView([st.lat, st.lon], st.zoom);
+    if (st) loadStateCities(st.code);
   });
 
   const cityInput = $('#cityInput');
   const sugg = $('#citySuggest');
   let suggAbort;
-  const runSuggest = debounce(async () => {
+  let suggItems = [];
+  let suggActive = -1;
+
+  const localCityMatches = (q) => {
+    const st = stateSel.value;
+    const hs = HOTSPOTS.filter((h) => (!st || h.state === st) && (!q || h.name.toLowerCase().includes(q.toLowerCase())))
+      .map((h) => ({ name: h.name, state: h.state, lat: h.lat, lon: h.lon, label: `🏖️ ${h.name}, ${h.state} · W&T курорт${h.housing === 'employer' ? ' · 🏠' : ''}` }));
+    const list = st ? (stateCities.get(st) || []) : [];
+    const cities = matchCities(list, q, 14)
+      .filter((c) => !hs.some((h) => h.name.toLowerCase() === c.name.toLowerCase()))
+      .map((c) => ({ ...c, label: `${c.name}, ${c.state}${c.pop ? ` · ${c.pop.toLocaleString('ru-RU')} жит.` : ''}` }));
+    return [...hs, ...cities];
+  };
+
+  const showSuggest = debounce(async () => {
     const q = cityInput.value.trim();
     suggAbort?.abort();
-    if (q.length < 2) { sugg.hidden = true; return; }
+    const st = stateSel.value;
+    if (!st && q.length < 2) { renderSuggest([], { hint: 'Сначала выбери штат — покажу его города.' }); return; }
+    const local = localCityMatches(q);
+    const loadingList = st && !stateCities.has(st);
+    renderSuggest(local, { loading: loadingList || q.length >= 2, title: q ? '' : 'Популярные места штата' });
+    if (q.length < 2) return;
     suggAbort = new AbortController();
     try {
-      const local = HOTSPOTS.filter((h) => h.name.toLowerCase().includes(q.toLowerCase()) && (!stateSel.value || h.state === stateSel.value))
-        .map((h) => ({ name: h.name, state: h.state, lat: h.lat, lon: h.lon, label: `${h.name}, ${h.state} · W&T курорт` }));
-      renderSuggest(local, true);
-      const remote = await suggestCities(q, { stateCode: stateSel.value, signal: suggAbort.signal });
-      renderSuggest([...local, ...remote].slice(0, 10), false);
+      const remote = await suggestCities(q, { stateCode: st, signal: suggAbort.signal });
+      const merged = [...localCityMatches(cityInput.value.trim())];
+      for (const r of remote) if (!merged.some((m) => m.name.toLowerCase() === r.name.toLowerCase() && m.state === r.state)) merged.push(r);
+      renderSuggest(merged.slice(0, 16), {});
     } catch (e) {
-      if (e.name !== 'AbortError') renderSuggest([], false);
+      if (e.name !== 'AbortError') renderSuggest(localCityMatches(cityInput.value.trim()), {});
     }
-  }, 300);
+  }, 200);
+  showSuggest.refresh = () => { if (document.activeElement === cityInput) showSuggest(); };
 
-  function renderSuggest(items, loading) {
-    if (!items.length && !loading) { sugg.innerHTML = '<li class="muted">Ничего не найдено. Нажми «Найти» — попробуем найти город так.</li>'; sugg.hidden = false; return; }
-    sugg.innerHTML = items.map((c, i) => `<li data-i="${i}" tabindex="-1">${esc(c.label)}</li>`).join('') + (loading ? '<li class="muted">Ищу…</li>' : '');
+  function renderSuggest(items, { loading = false, title = '', hint = '' } = {}) {
+    suggItems = items;
+    suggActive = -1;
+    if (hint) { sugg.innerHTML = `<li class="muted">${esc(hint)}</li>`; sugg.hidden = false; return; }
+    if (!items.length && !loading) {
+      sugg.innerHTML = '<li class="muted">Не нашёл в списке. Проверь написание (латиницей) или нажми «Найти»: поищу по карте.</li>';
+      sugg.hidden = false;
+      return;
+    }
+    sugg.innerHTML = (title ? `<li class="muted small">${esc(title)}</li>` : '')
+      + items.map((c, i) => `<li data-i="${i}" tabindex="-1">${esc(c.label)}</li>`).join('')
+      + (loading ? '<li class="muted">Загружаю города…</li>' : '');
     sugg.hidden = false;
     $$('li[data-i]', sugg).forEach((li) => li.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      pickCity(items[Number(li.dataset.i)]);
+      pickCity(suggItems[Number(li.dataset.i)]);
       sugg.hidden = true;
     }));
   }
 
-  cityInput.addEventListener('input', () => { state.city = null; runSuggest(); });
+  cityInput.addEventListener('input', () => { state.city = null; showSuggest(); });
+  cityInput.addEventListener('focus', () => showSuggest());
   cityInput.addEventListener('blur', () => setTimeout(() => { sugg.hidden = true; }, 150));
-  cityInput.addEventListener('keydown', (e) => { if (e.key === 'Escape') sugg.hidden = true; });
+  cityInput.addEventListener('keydown', (e) => {
+    const lis = $$('li[data-i]', sugg);
+    if (e.key === 'Escape') { sugg.hidden = true; return; }
+    if (sugg.hidden || !lis.length) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      suggActive = (suggActive + (e.key === 'ArrowDown' ? 1 : -1) + lis.length) % lis.length;
+      lis.forEach((li, i) => li.classList.toggle('active', i === suggActive));
+      lis[suggActive].scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter' && suggActive >= 0) {
+      e.preventDefault();
+      pickCity(suggItems[suggActive]);
+      sugg.hidden = true;
+    }
+  });
+  cityPickerRefresh = showSuggest.refresh;
 
   $('#searchForm').addEventListener('submit', (e) => { e.preventDefault(); doSearch(); });
   $('#filterInput').addEventListener('input', debounce(renderResults, 150));
   $('#fitFilter').addEventListener('change', renderResults);
+  $('#housingFilter').addEventListener('change', renderResults);
   $('#sortSelect').addEventListener('change', renderResults);
   $('#selectAll').addEventListener('change', (e) => {
     visibleResults().forEach((l) => (e.target.checked ? state.selected.add(l.id) : state.selected.delete(l.id)));
@@ -324,6 +415,7 @@ function initSearchForm() {
   syncMode();
   renderHotspotChips();
   renderLaunchers();
+  if (stateSel.value) loadStateCities(stateSel.value);
 }
 
 function syncMode() {
@@ -347,7 +439,7 @@ function renderHotspotChips() {
   const st = $('#stateSelect').value;
   const list = HOTSPOTS.filter((h) => h.state === st);
   $('#hotspotChips').innerHTML = list.length
-    ? `<span class="muted small">W&T курорты:</span>${list.map((h) => `<button type="button" class="chip ${state.city?.name === h.name ? 'on' : ''}" data-id="${h.id}">${esc(h.name)}</button>`).join('')}`
+    ? `<span class="muted small">W&T курорты:</span>${list.map((h) => `<button type="button" class="chip ${state.city?.name === h.name ? 'on' : ''}" data-id="${h.id}" ${h.housing === 'employer' ? 'title="Часто жильё от работодателя"' : ''}>${esc(h.name)}${h.housing === 'employer' ? ' 🏠' : ''}</button>`).join('')}`
     : '';
   $$('.chip', $('#hotspotChips')).forEach((b) => b.addEventListener('click', () => {
     const h = HOTSPOTS.find((x) => x.id === b.dataset.id);
@@ -396,9 +488,11 @@ async function doSearch() {
   try {
     if (mode === 'around' && !state.city) {
       const name = $('#cityInput').value.trim();
-      if (!name) throw new Error('Введи город или выбери W&T курорт.');
+      if (!name) throw new Error('Выбери город: нажми на поле «Город» — появится список городов штата, или нажми на W&T курорт.');
       setStatus('<span class="spinner"></span> Ищу город на карте…');
-      const hit = await geocodeCity(name, st, { signal: ctrl.signal });
+      const exact = [...HOTSPOTS.filter((h) => h.state === st), ...(stateCities.get(st) || [])]
+        .find((c) => c.name.toLowerCase() === name.toLowerCase());
+      const hit = exact ? { name: exact.name, state: st, lat: exact.lat, lon: exact.lon } : await geocodeCity(name, st, { signal: ctrl.signal });
       if (!hit) throw new Error(`Город «${name}» не найден в штате ${st}.`);
       pickCity(hit);
     }
@@ -486,8 +580,10 @@ function mergeLeads(a, b) {
 function visibleResults() {
   const q = $('#filterInput').value.trim().toLowerCase();
   const fit = $('#fitFilter').value;
+  const housing = $('#housingFilter').value;
   return sortLeads(state.results, $('#sortSelect').value).filter((l) => (!q || l.name.toLowerCase().includes(q) || (l.address || '').toLowerCase().includes(q))
-    && (fit === 'all' || l.fit?.level === fit));
+    && (fit === 'all' || l.fit?.level === fit)
+    && (housing === 'all' || HOUSING_LIKELY_CATEGORIES.includes(l.category)));
 }
 
 function renderResults(updateMap = false) {
@@ -496,7 +592,8 @@ function renderResults(updateMap = false) {
   $('#resultsBar').hidden = !all.length;
   const withEmail = all.filter((l) => l.emails.length).length;
   const withSite = all.filter((l) => l.website).length;
-  $('#resultsSummary').innerHTML = `Найдено <b>${all.length}</b> · с email <b>${withEmail}</b> · с сайтом <b>${withSite}</b>${list.length !== all.length ? ` · показано ${list.length}` : ''}`;
+  const hs = state.lastCtx?.center ? hotspotFor(state.lastCtx.city, state.lastCtx.state) : null;
+  $('#resultsSummary').innerHTML = `Найдено <b>${all.length}</b> · с email <b>${withEmail}</b> · с сайтом <b>${withSite}</b>${list.length !== all.length ? ` · показано ${list.length}` : ''}${hs?.housing === 'employer' ? ' · <span class="badge st-green">🏠 здесь работодатели часто дают жильё</span>' : ''}`;
   $('#results').innerHTML = list.map(leadCard).join('');
   bindCards($('#results'), (id) => state.results.find((l) => l.id === id));
   if (updateMap === true) renderMarkers(all);
@@ -521,6 +618,7 @@ function leadCard(l) {
         ${l.distanceKm != null ? `<span>${l.distanceKm.toFixed(1)} км от центра</span>` : ''}
         ${l.rating ? `<span>★ ${l.rating} (${l.ratingCount || 0})</span>` : ''}
         ${l.source === 'google' ? '<span>Google</span>' : ''}
+        ${HOUSING_LIKELY_CATEGORIES.includes(l.category) ? '<span title="Отели, курорты, кемпинги и парки чаще других дают сотрудникам жильё. Спроси в письме.">🏠 часто дают жильё</span>' : ''}
       </div>
       ${l.address ? `<div class="lead-addr">📍 ${esc(l.address)}</div>` : ''}
       ${l.fit?.notes?.length ? `<div class="lead-note">${esc(l.fit.notes.join(' '))}</div>` : ''}
@@ -646,7 +744,9 @@ function openPlace(lead) {
       <a class="btn primary" href="${esc(googleMapsUrl(lead))}" target="_blank" rel="noopener">Открыть в Google Maps (отзывы, фото)</a>
       ${lead.website ? `<a class="btn" href="${esc(lead.website)}" target="_blank" rel="noopener">Сайт</a>` : ''}
       <a class="btn" href="${esc(emailSearchUrl(lead))}" target="_blank" rel="noopener">Найти контакты в Google</a>
-    </div>`;
+    </div>
+    <h4 class="pm-sub">🏠 Жильё рядом с работой</h4>
+    <div class="link-grid">${housingLinks(lead).map((h) => `<a class="link-chip" href="${esc(h.url)}" target="_blank" rel="noopener">${esc(h.label)}</a>`).join('')}</div>`;
   $('#placeModal').showModal();
 }
 
@@ -750,6 +850,7 @@ function initTracker() {
   $('#trackerFilter').addEventListener('input', debounce(renderTracker, 150));
   $('#trackerStatus').addEventListener('change', renderTracker);
   $('#trackerState').addEventListener('change', renderTracker);
+  $('#trackerHousing').addEventListener('change', renderTracker);
   $('#queueBtn').addEventListener('click', () => startQueue('cold'));
   $('#followupBtn').addEventListener('click', () => startQueue('followup'));
   $('#enrichAllBtn').addEventListener('click', async () => {
@@ -757,7 +858,7 @@ function initTracker() {
     renderTracker();
   });
   $('#exportCsv').addEventListener('click', () => {
-    const rows = filteredTracker().map((l) => ({ ...l, gmaps: googleMapsUrl(l) }));
+    const rows = filteredTracker().map((l) => ({ ...l, gmaps: googleMapsUrl(l), housingLabel: HOUSING_STATUS[l.housing]?.label.replace(/^\S+\s/, '') || '' }));
     download(`wt-contacts-${new Date().toISOString().slice(0, 10)}.csv`, `﻿${leadsToCsv(rows, (s) => STATUS_BY_ID[s]?.label || s)}`, 'text/csv');
   });
   $('#exportJson').addEventListener('click', () => {
@@ -804,9 +905,12 @@ function filteredTracker() {
   const q = $('#trackerFilter').value.trim().toLowerCase();
   const st = $('#trackerStatus').value;
   const stateCode = $('#trackerState').value;
+  const housing = $('#trackerHousing').value;
+  const housingOk = (l) => !housing
+    || (housing === 'unknown' ? !l.housing : housing === 'mentioned' ? l.housingMentioned : l.housing === housing);
   return [...state.saved.values()]
     .filter((l) => (!q || `${l.name} ${l.city} ${l.notes} ${(l.emails || []).join(' ')}`.toLowerCase().includes(q))
-      && (!st || l.status === st) && (!stateCode || l.state === stateCode))
+      && (!st || l.status === st) && (!stateCode || l.state === stateCode) && housingOk(l))
     .sort((a, b) => (isFollowupDue(b) - isFollowupDue(a)) || (b.addedAt || '').localeCompare(a.addedAt || ''));
 }
 
@@ -859,6 +963,8 @@ function renderTracker() {
           <h4>${cat?.icon || ''} ${esc(l.name)}</h4>
           <span class="badge fit-${l.fit?.level}">${FIT_LABEL[l.fit?.level] || ''}</span>
           ${dueNow ? '<span class="badge st-amber">Пора напомнить</span>' : ''}
+          ${l.housing ? `<span class="badge st-${HOUSING_STATUS[l.housing].color}">${esc(HOUSING_STATUS[l.housing].label)}${l.housingCost ? ` · ${esc(l.housingCost)}` : ''}</span>` : ''}
+          ${l.housingMentioned && !l.housing ? '<span class="badge st-amber">🏠 Упомянули жильё в ответе</span>' : ''}
           ${l.status && l.status !== 'new' ? `<span class="badge st-${STATUS_BY_ID[l.status]?.color || 'gray'}">${esc(STATUS_BY_ID[l.status]?.label || l.status)}</span>` : ''}
         </div>
         <div class="lead-meta">
@@ -877,7 +983,12 @@ function renderTracker() {
         <div class="trow-edit">
           <select data-act="status">${STATUSES.map((s) => `<option value="${s.id}" ${s.id === l.status ? 'selected' : ''}>${esc(s.label)}</option>`).join('')}</select>
           <input data-act="emails" placeholder="Добавить email вручную" value="">
-          <input data-act="notes" placeholder="Заметки: ставка, жильё, имя менеджера…" value="${esc(l.notes || '')}">
+          <input data-act="notes" placeholder="Заметки: ставка, имя менеджера…" value="${esc(l.notes || '')}">
+          <select data-act="housing" title="Жильё">
+            <option value="" ${!l.housing ? 'selected' : ''}>🏠 Жильё: ещё не знаем</option>
+            ${Object.entries(HOUSING_STATUS).map(([k, v]) => `<option value="${k}" ${l.housing === k ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}
+          </select>
+          <input data-act="housingCost" placeholder="Цена жилья, напр. $150/нед" value="${esc(l.housingCost || '')}">
         </div>
       </div>
       <div class="trow-actions">
@@ -912,6 +1023,8 @@ function renderTracker() {
       persistLeads(); renderTracker(); renderResults();
     }
     if (el.dataset.act === 'notes') { lead.notes = el.value; persistLeads(); }
+    if (el.dataset.act === 'housing') { lead.housing = el.value; persistLeads(); renderTracker(); }
+    if (el.dataset.act === 'housingCost') { lead.housingCost = el.value.trim(); persistLeads(); renderTracker(); }
     if (el.dataset.act === 'emails') {
       const add = (el.value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || []).map((x) => x.toLowerCase());
       if (add.length) { lead.emails = [...new Set([...(lead.emails || []), ...add])]; persistLeads(); renderTracker(); toast('Email добавлен'); }
@@ -1031,7 +1144,7 @@ function initHotspots() {
   const regions = [...new Set(HOTSPOTS.map((h) => h.region))];
   $('#hsRegion').innerHTML += regions.map((r) => `<option>${esc(r)}</option>`).join('');
   $('#hsType').innerHTML += Object.entries(HOTSPOT_TYPES).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('');
-  ['hsRegion', 'hsType'].forEach((id) => $(`#${id}`).addEventListener('change', renderHotspots));
+  ['hsRegion', 'hsType', 'hsHousing'].forEach((id) => $(`#${id}`).addEventListener('change', renderHotspots));
   $('#hsSearch').addEventListener('input', debounce(renderHotspots, 150));
   renderHotspots();
   $('#hotspotGrid').addEventListener('click', (e) => {
@@ -1051,7 +1164,8 @@ function renderHotspots() {
   const region = $('#hsRegion').value;
   const type = $('#hsType').value;
   const q = $('#hsSearch').value.trim().toLowerCase();
-  const list = HOTSPOTS.filter((h) => (!region || h.region === region) && (!type || h.type === type)
+  const housing = $('#hsHousing').value;
+  const list = HOTSPOTS.filter((h) => (!region || h.region === region) && (!type || h.type === type) && (!housing || h.housing === housing)
     && (!q || `${h.name} ${h.state} ${STATE_BY_CODE[h.state].name} ${h.employers.join(' ')}`.toLowerCase().includes(q)));
   const savedByCity = {};
   for (const l of state.saved.values()) savedByCity[`${l.city}|${l.state}`] = (savedByCity[`${l.city}|${l.state}`] || 0) + 1;
@@ -1061,6 +1175,7 @@ function renderHotspots() {
       <h3>${esc(h.name)}, ${h.state}</h3>
       <p class="muted small">${esc(STATE_BY_CODE[h.state].name)}</p>
       <p>${esc(h.note)}</p>
+      ${h.housing ? `<p><span class="badge st-green">${esc(HOUSING_INFO[h.housing].label)}</span></p>` : ''}
       ${h.employers.length ? `<p class="small"><b>Известные работодатели:</b> ${h.employers.map(esc).join(', ')}</p>` : ''}
       <div class="row wrap">
         <button class="btn sm primary" data-hs="${h.id}">🔎 Искать здесь</button>
@@ -1359,6 +1474,7 @@ async function checkReplies({ quiet = false } = {}) {
         const now = new Date().toISOString();
         if (a.replied && l.reply?.messageId !== a.reply.messageId) {
           l.reply = a.reply;
+          if (HOUSING_RE.test(a.reply.snippet || '')) l.housingMentioned = true;
           l.replySeen = false;
           if (['new', 'emailed', 'followup', 'bounced'].includes(l.status)) l.status = 'replied';
           l.history = [...(l.history || []), { at: now, action: 'status:replied', via: 'gmail-check' }];

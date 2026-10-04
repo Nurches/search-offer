@@ -102,6 +102,10 @@
                 <option value="check">⚠ Уточнить</option>
                 <option value="bad">✕ Не подходит</option>
               </select>
+              <select id="housingFilter" title="Жильё">
+                <option value="all">🏠 Жильё: все места</option>
+                <option value="likely">🏠 Чаще дают жильё (отели, курорты, кемпинги, парки)</option>
+              </select>
               <select id="sortSelect">
                 <option value="contacts">Сначала с контактами</option>
                 <option value="distance">Ближе к центру</option>
@@ -130,6 +134,7 @@
         <div class="hs-filters">
           <select id="hsRegion"><option value="">Все регионы</option></select>
           <select id="hsType"><option value="">Все типы</option></select>
+          <select id="hsHousing"><option value="">🏠 Жильё: все</option><option value="employer">🏠 Часто жильё от работодателя</option></select>
           <input type="search" id="hsSearch" placeholder="Поиск по городу или штату…">
         </div>
       </div>
@@ -148,6 +153,14 @@
           <input type="search" id="trackerFilter" placeholder="Поиск…">
           <select id="trackerStatus"><option value="">Все статусы</option></select>
           <select id="trackerState"><option value="">Все штаты</option></select>
+          <select id="trackerHousing">
+            <option value="">🏠 Жильё: все</option>
+            <option value="provided">Даёт жильё</option>
+            <option value="help">Помогает найти</option>
+            <option value="none">Нет, ищем сами</option>
+            <option value="unknown">Ещё не знаем</option>
+            <option value="mentioned">Упомянули жильё в ответе</option>
+          </select>
           <button class="btn primary" id="queueBtn" type="button">🚀 Рассылка по очереди</button>
           <button class="btn" id="followupBtn" type="button">🔁 Пора напомнить</button>
           <button class="btn" id="enrichAllBtn" type="button" hidden>📧 Найти email</button>
@@ -188,6 +201,12 @@
             <label class="field"><span>Агентство (для себя)</span><input name="agency" placeholder="ЦМО"></label>
             <label class="field"><span>Могу начать с</span><input name="startDate"></label>
             <label class="field"><span>Работаю до</span><input name="endDate"></label>
+            <label class="field"><span>🏠 Жильё</span>
+              <select name="housingNeed">
+                <option value="yes">Спрашивать в письме, даёт ли работодатель жильё</option>
+                <option value="no">Не спрашивать (жильё найдём сами)</option>
+              </select>
+            </label>
           </div>
           <fieldset class="partner" id="partnerFields">
             <legend>👭 Подруга / друг</legend>
@@ -319,6 +338,20 @@
             <li>Просят паспортные данные или банковскую карту до подписания оффера</li>
           </ul>
           <p>Всегда проверяй заведение в Google Maps: отзывы, фото, сайт. Кнопка «Посмотреть» показывает карту прямо здесь.</p>
+        </div>
+
+        <div class="card">
+          <h2>🏠 Жильё</h2>
+          <ul>
+            <li><b>Лучший вариант:</b> жильё от работодателя (employee housing, dorms). Его часто дают на островах, в нацпарках, на Аляске и в больших парках развлечений. На вкладке «Курорты» такие места помечены 🏠.</li>
+            <li>В письмах сайт сам спрашивает про жильё (настройка «🏠 Жильё» в профиле). В трекере отмечай ответ: «даёт», «помогает найти», «нет», и цену в неделю.</li>
+            <li>Обычная цена в курортах: примерно <b>$100–250 в неделю с человека</b> за комнату на двоих–четверых. Иногда вычитают из зарплаты, это нормально, но сумма должна быть в оффере.</li>
+            <li>Уточни: сколько человек в комнате, есть ли кухня и Wi-Fi, сколько идти или ехать до работы, нужен ли депозит.</li>
+            <li>Жильё должно быть недалеко от работы: пешком, на велосипеде или общественном транспорте. Машины у вас не будет.</li>
+            <li>Ищете вдвоём — просите жильё в одной комнате или квартире и пишите об этом сразу.</li>
+            <li>⚠️ Не переводите депозит незнакомым людям через Western Union, Zelle или крипту до подтверждения от работодателя или спонсора. Это частая схема обмана.</li>
+            <li>Адрес жилья понадобится спонсору. Уточни в ЦМО, к какому сроку.</li>
+          </ul>
         </div>
 
         <div class="card">

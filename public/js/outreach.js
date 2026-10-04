@@ -25,6 +25,7 @@ export const DEFAULT_PROFILE = {
   partnerUniversity: '',
   partnerEnglish: 'Upper-Intermediate (B2)',
   ccPartner: 'yes',
+  housingNeed: 'yes', // ask employers about staff housing in emails
 };
 
 export const SOLO_EXPERIENCE = DEFAULT_PROFILE.experience;
@@ -44,6 +45,8 @@ A little about me:
 - English level: {{english}}
 - Available full-time (32–40+ hours per week) for the whole season, including weekends and holidays
 - {{experience}}
+
+{{housingLine}}
 
 Hiring a J-1 student is easy for employers: my sponsor arranges the visa, health insurance and SEVIS registration, there is no sponsorship fee for you, and J-1 students are generally exempt from FICA taxes (Social Security and Medicare). I would only need a job offer to submit to my sponsor.
 
@@ -68,6 +71,8 @@ I will be in the United States on the J-1 Summer Work and Travel program through
 
 - English level: {{english}}
 - {{experience}}
+
+{{housingLine}}
 
 My sponsor handles the visa, insurance and SEVIS paperwork, and there is no sponsorship fee for employers.
 
@@ -114,6 +119,8 @@ A little about us:
 - Both available full-time (32–40+ hours per week) for the whole season, including weekends and holidays
 - {{experience}}
 
+{{housingLine}}
+
 Hiring J-1 students is easy for employers: our sponsor arranges the visas, health insurance and SEVIS registration, there is no sponsorship fee for you, and J-1 students are generally exempt from FICA taxes (Social Security and Medicare). We would only need a job offer for each of us to submit to our sponsor.
 
 Our resume: {{resumeLink}}
@@ -136,6 +143,8 @@ We will be in the United States on the J-1 Summer Work and Travel program throug
 
 - English level: {{englishLine}}
 - {{experience}}
+
+{{housingLine}}
 
 Our sponsor handles the visa, insurance and SEVIS paperwork, and there is no sponsorship fee for employers. We would need a job offer for each of us.
 
@@ -209,6 +218,9 @@ export function buildVars(profile, lead = {}, extra = {}) {
     city,
     positions: cat?.positions || 'housekeeping, food service or guest services',
     positionTitle: extra.positionTitle || cat?.positions?.split(',')[0]?.trim() || 'seasonal',
+    housingLine: p.housingNeed === 'yes'
+      ? 'Housing is very important for me: do you provide employee housing, or could you help me find affordable housing close to work?'
+      : '',
   };
   if (p.searchMode === 'pair') {
     const partnerName = p.partnerName || "[Friend's Name]";
@@ -223,6 +235,9 @@ export function buildVars(profile, lead = {}, extra = {}) {
         : `${name} – ${p.english}, ${partnerName} – ${p.partnerEnglish}`,
       experience: p.experience === SOLO_EXPERIENCE ? PAIR_EXPERIENCE : p.experience,
       contacts: [contactLine(name, p.phone, p.email), contactLine(partnerName, p.partnerPhone, p.partnerEmail)].filter(Boolean).join('\n'),
+      housingLine: p.housingNeed === 'yes'
+        ? 'Housing is very important for us: do you provide employee housing for two people, or could you help us find affordable housing close to work?'
+        : '',
     });
   }
   return { ...vars, ...extra };
@@ -303,5 +318,20 @@ export function jobBoardLinks(city, stateCode) {
     { label: 'Craigslist', url: googleSearchUrl(`site:craigslist.org ${loc} summer seasonal jobs`) },
     { label: '“J-1 housing provided”', url: googleSearchUrl(`"J-1" "housing" seasonal jobs ${loc} 2027`) },
     { label: 'Facebook-группы W&T', url: googleSearchUrl(`facebook group work and travel ${stateName} jobs`) },
+  ];
+}
+
+/** Links for finding housing near a workplace (rooms, shared apartments, weekly motels, J-1 groups). */
+export function housingLinks(lead) {
+  const near = lead.address || [lead.city, lead.state].filter(Boolean).join(', ');
+  const town = [lead.city, lead.state].filter(Boolean).join(', ') || near;
+  const gm = (what) => `https://www.google.com/maps/search/${encodeURIComponent(`${what} near ${near}`)}`;
+  return [
+    { label: '🏢 Квартиры рядом (Google Maps)', url: gm('apartments for rent') },
+    { label: '🛏️ Мотели с недельной оплатой', url: gm('motel weekly rates') },
+    { label: 'Сдают комнату / жильё для сезонных работников', url: googleSearchUrl(`"seasonal" OR "summer" employee housing ${town} room for rent`) },
+    { label: 'Craigslist: жильё', url: googleSearchUrl(`site:craigslist.org ${town} room for rent summer`) },
+    { label: 'Facebook: J-1 housing', url: googleSearchUrl(`facebook J1 student housing ${town}`) },
+    { label: 'Zillow: аренда', url: googleSearchUrl(`site:zillow.com ${town} rentals`) },
   ];
 }

@@ -22,6 +22,13 @@ const OVERPASS_FIXTURE = {
   ],
 };
 
+const CITY_FIXTURE = { elements: [
+  { type: 'node', id: 1, lat: 61.2181, lon: -149.9003, tags: { name: 'Anchorage', place: 'city', population: '291247' } },
+  { type: 'node', id: 2, lat: 64.8378, lon: -147.7164, tags: { name: 'Fairbanks', place: 'city', population: '32515' } },
+  { type: 'node', id: 3, lat: 60.1042, lon: -149.4422, tags: { name: 'Seward', place: 'town', population: '2717' } },
+] };
+const overpassBody = (req) => (decodeURIComponent(req.postData() || '').includes('"place"~') ? CITY_FIXTURE : OVERPASS_FIXTURE);
+
 const outDir = path.resolve('test-results');
 fs.mkdirSync(outDir, { recursive: true });
 
@@ -41,8 +48,8 @@ async function newPage(viewport, { withServer = true } = {}) {
   page.on('console', (m) => { if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) errors.push(`console: ${m.text()}`); });
   await page.route('https://tile.openstreetmap.org/**', (r) => r.fulfill({ status: 204, body: '' }));
   await page.route('https://maps.google.com/**', (r) => r.fulfill({ status: 200, contentType: 'text/html', body: '<p>map</p>' }));
-  await page.route('**/api/overpass', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(OVERPASS_FIXTURE) }));
-  await page.route('https://overpass-api.de/**', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(OVERPASS_FIXTURE) }));
+  await page.route('**/api/overpass', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(overpassBody(r.request())) }));
+  await page.route('https://overpass-api.de/**', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(overpassBody(r.request())) }));
   await page.route('**/api/emails?**', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ emails: ['hr@oceanbreeze.test'], pages: [] }) }));
   await page.route('https://photon.komoot.io/**', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ features: [{ properties: { name: 'Ocean City', state: 'Maryland', countrycode: 'US', county: 'Worcester County' }, geometry: { coordinates: [-75.0849, 38.3365] } }] }) }));
   if (!withServer) await page.route('**/api/health', (r) => r.fulfill({ status: 404, body: 'nope' }));
@@ -160,12 +167,58 @@ try {
   await row.locator('select[data-act="status"]').selectOption('replied');
   await page.reload();
   await page.click('.tab[data-tab="tracker"]');
-  assert.equal(await page.locator('.trow', { hasText: 'Salty Scoops' }).locator('select').inputValue(), 'replied');
+  assert.equal(await page.locator('.trow', { hasText: 'Salty Scoops' }).locator('select[data-act="status"]').inputValue(), 'replied');
   await page.screenshot({ path: path.join(outDir, 'tracker.png') });
+
+  // Housing in tracker
+  const sRow = page.locator('.trow', { hasText: 'Salty Scoops' });
+  await sRow.locator('select[data-act="housing"]').selectOption('provided');
+  await page.locator('.trow', { hasText: 'Salty Scoops' }).locator('input[data-act="housingCost"]').fill('$150/нед');
+  await page.locator('.trow', { hasText: 'Salty Scoops' }).locator('input[data-act="housingCost"]').press('Enter');
+  await page.locator('.trow', { hasText: 'Salty Scoops' }).locator('input[data-act="housingCost"]').blur();
+  await page.selectOption('#trackerHousing', 'provided');
+  assert.equal(await page.locator('.trow').count(), 1);
+  assert.match(await page.textContent('.trow'), /Даёт жильё · \$150\/нед/);
+  await page.selectOption('#trackerHousing', '');
 
   // Rules tab
   await page.click('.tab[data-tab="rules"]');
   assert.match(await page.textContent('#tab-rules'), /22 CFR 62\.32/);
+  assert.match(await page.textContent('#tab-rules'), /🏠 Жильё/);
+
+  // Hotspots: housing filter
+  await page.click('.tab[data-tab="hotspots"]');
+  await page.fill('#hsSearch', '');
+  await page.selectOption('#hsHousing', 'employer');
+  const hsCount = await page.locator('.hs').count();
+  assert.ok(hsCount >= 25 && hsCount < 60, `housing hotspots ${hsCount}`);
+  assert.equal(await page.locator('.hs', { hasText: 'Ocean City, MD' }).count(), 0);
+  assert.equal(await page.locator('.hs', { hasText: 'Mackinac Island' }).count(), 1);
+
+  // City picker: Alaska shows its cities on focus, filters while typing, search works
+  await page.click('.tab[data-tab="search"]');
+  await page.selectOption('#stateSelect', 'AK');
+  await page.click('#cityInput');
+  await page.waitForSelector('#citySuggest li:has-text("Anchorage")');
+  assert.match(await page.textContent('#citySuggest'), /Denali Park, AK · W&T курорт · 🏠/);
+  await page.fill('#cityInput', 'fair');
+  await page.waitForSelector('#citySuggest li:has-text("Fairbanks")');
+  await page.locator('#citySuggest li', { hasText: 'Fairbanks' }).click();
+  assert.equal(await page.inputValue('#cityInput'), 'Fairbanks');
+  await page.click('#searchBtn');
+  await page.waitForSelector('.lead');
+  // typed name without picking also resolves from the state list (no geocoder call)
+  await page.fill('#cityInput', 'Anchorage');
+  await page.click('#searchBtn');
+  await page.waitForFunction(() => window.wt.state.city?.name === 'Anchorage');
+  // housing filter in results
+  await page.selectOption('#housingFilter', 'likely');
+  const names = await page.locator('.lead h4').allTextContents();
+  assert.ok(names.every((n) => /Hotel/.test(n)), names.join('|'));
+  await page.selectOption('#housingFilter', 'all');
+  await page.locator('.lead', { hasText: 'Ocean Breeze Hotel' }).locator('[data-act="view"]').click();
+  assert.match(await page.textContent('#pmInfo'), /Жильё рядом с работой/);
+  await page.click('#placeModal [data-close]');
 
   // ---- one-click Gmail campaign + reply tracking (Google sign-in and Gmail API mocked) ----
   {
@@ -185,7 +238,7 @@ try {
     });
     const sent = [];
     await g.route('https://tile.openstreetmap.org/**', (r) => r.fulfill({ status: 204, body: '' }));
-    await g.route('**/api/overpass', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(OVERPASS_FIXTURE) }));
+    await g.route('**/api/overpass', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(overpassBody(r.request())) }));
     await g.route('**/api/emails?**', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ emails: ['hr@oceanbreeze.test'], pages: [] }) }));
     await g.route('https://gmail.googleapis.com/**', async (r) => {
       const url = new URL(r.request().url());
@@ -267,7 +320,7 @@ try {
   assert.equal(await m.isHidden('#bulkEnrich'), true);
   await m.selectOption('#stateSelect', 'MD');
   await m.fill('#cityInput', 'Ocean');
-  await m.locator('#citySuggest li', { hasText: 'Worcester County' }).click();
+  await m.locator('#citySuggest li', { hasText: 'Ocean City, MD' }).first().click();
   await m.click('#searchBtn');
   await m.waitForSelector('.lead');
   const hotelM = m.locator('.lead', { hasText: 'Ocean Breeze Hotel' });

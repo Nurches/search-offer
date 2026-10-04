@@ -26,7 +26,7 @@ export const KEYS = {
 };
 
 const LEAD_FIELDS = ['id', 'source', 'name', 'category', 'address', 'city', 'state', 'lat', 'lon', 'phone',
-  'website', 'emails', 'facebook', 'placeId', 'gmapsUrl', 'rating', 'ratingCount', 'fit', 'gmail', 'reply', 'replySeen'];
+  'website', 'emails', 'facebook', 'placeId', 'gmapsUrl', 'rating', 'ratingCount', 'fit', 'gmail', 'reply', 'replySeen', 'housing', 'housingCost', 'housingMentioned'];
 
 export function toSavedLead(lead) {
   const out = {};
@@ -70,9 +70,9 @@ const csvCell = (v) => {
 };
 
 export function leadsToCsv(leads, statusLabel = (s) => s) {
-  const head = ['Name', 'Category', 'Status', 'Emails', 'Phone', 'Website', 'Address', 'City', 'State', 'Last contact', 'Notes', 'Google Maps'];
+  const head = ['Name', 'Category', 'Status', 'Housing', 'Housing $/week', 'Emails', 'Phone', 'Website', 'Address', 'City', 'State', 'Last contact', 'Notes', 'Google Maps'];
   const rows = leads.map((l) => [
-    l.name, l.category, statusLabel(l.status), (l.emails || []).join(' '), l.phone, l.website, l.address,
+    l.name, l.category, statusLabel(l.status), l.housingLabel || l.housing || '', l.housingCost || '', (l.emails || []).join(' '), l.phone, l.website, l.address,
     l.city, l.state, l.lastContactAt ? l.lastContactAt.slice(0, 10) : '', l.notes, l.gmaps || '',
   ]);
   return [head, ...rows].map((r) => r.map(csvCell).join(',')).join('\n');

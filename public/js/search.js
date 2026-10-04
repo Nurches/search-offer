@@ -256,3 +256,41 @@ export async function geocodeCity(city, stateCode, { signal } = {}) {
     lon: Number(hit.lon),
   };
 }
+
+// ---------- per-state city list (for the city picker) ----------
+export function buildCityListQuery(stateCode) {
+  if (!STATE_BY_CODE[stateCode]) throw new Error('Выбери штат');
+  return `[out:json][timeout:90];\narea["ISO3166-2"="US-${stateCode}"]["admin_level"="4"]->.st;\nnode["place"~"^(city|town|village)$"]["name"](area.st);\nout 4000;`;
+}
+
+/** Overpass places → [{name, state, lat, lon, pop}] sorted by population. */
+export function parseCityList(json, stateCode) {
+  const seen = new Set();
+  const out = [];
+  for (const el of json?.elements || []) {
+    const name = (el.tags?.['name:en'] || el.tags?.name || '').trim();
+    if (!name || !Number.isFinite(el.lat) || !Number.isFinite(el.lon)) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const pop = parseInt(String(el.tags.population || '').replace(/[^\d]/g, ''), 10) || 0;
+    const rank = { city: 2, town: 1, village: 0 }[el.tags.place] ?? 0;
+    out.push({ name, state: stateCode, lat: el.lat, lon: el.lon, pop, rank });
+  }
+  return out.sort((a, b) => b.pop - a.pop || b.rank - a.rank || a.name.localeCompare(b.name));
+}
+
+/** Filters a city list by typed text: prefix matches first, then contains; bigger places first. */
+export function matchCities(list, q, limit = 12) {
+  const s = q.trim().toLowerCase();
+  if (!s) return list.slice(0, limit);
+  const starts = [];
+  const contains = [];
+  for (const c of list) {
+    const n = c.name.toLowerCase();
+    if (n.startsWith(s)) starts.push(c);
+    else if (n.includes(s)) contains.push(c);
+    if (starts.length >= limit) break;
+  }
+  return [...starts, ...contains].slice(0, limit);
+}
