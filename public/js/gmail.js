@@ -1,0 +1,167 @@
+// Gmail API from the browser: Google sign-in (token model), sending, and reply tracking.
+// Needs an OAuth "Web application" client ID; the access token lives only in memory.
+export const GMAIL_SCOPES = [
+  'https://www.googleapis.com/auth/gmail.send',
+  'https://www.googleapis.com/auth/gmail.readonly',
+].join(' ');
+
+const API = 'https://gmail.googleapis.com/gmail/v1/users/me';
+
+// ---------- pure helpers (unit-tested in Node) ----------
+export function utf8ToBase64(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+export const toBase64Url = (b64) => b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+export function encodeHeader(value) {
+  // RFC 2047 for non-ASCII subjects/names.
+  return /^[\x20-\x7e]*$/.test(value) ? value : `=?UTF-8?B?${utf8ToBase64(value)}?=`;
+}
+
+const cleanHeader = (v) => String(v || '').replace(/[\r\n]+/g, ' ').trim();
+
+/** Builds the base64url "raw" RFC 822 message for users.messages.send. */
+export function buildRawMessage({ to, cc, subject, body, inReplyTo }) {
+  const headers = [
+    `To: ${cleanHeader(to)}`,
+    cc ? `Cc: ${cleanHeader(cc)}` : null,
+    `Subject: ${encodeHeader(cleanHeader(subject))}`,
+    inReplyTo ? `In-Reply-To: ${cleanHeader(inReplyTo)}` : null,
+    inReplyTo ? `References: ${cleanHeader(inReplyTo)}` : null,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset="UTF-8"',
+    'Content-Transfer-Encoding: base64',
+  ].filter(Boolean);
+  const b64Body = utf8ToBase64(String(body || '').replace(/\r?\n/g, '\r\n')).replace(/(.{76})/g, '$1\r\n');
+  return toBase64Url(utf8ToBase64(`${headers.join('\r\n')}\r\n\r\n${b64Body}`));
+}
+
+export const headerOf = (msg, name) =>
+  (msg?.payload?.headers || []).find((h) => h.name.toLowerCase() === name.toLowerCase())?.value || '';
+
+export const emailOf = (fromHeader) => ((String(fromHeader).match(/<([^>]+)>/) || [])[1] || String(fromHeader)).trim().toLowerCase();
+
+const BOUNCE_FROM = /mailer-daemon|postmaster|mail delivery (subsystem|system)/i;
+const BOUNCE_SUBJECT = /delivery status notification|undeliverable|delivery (has )?failed|returned mail|address not found/i;
+
+/**
+ * Looks at a Gmail thread and tells whether the employer replied or the email bounced.
+ * ownAddresses: our own emails (me + partner) so our messages/CC replies don't count.
+ */
+export function analyzeThread(thread, ownAddresses = []) {
+  const own = new Set(ownAddresses.filter(Boolean).map((e) => e.toLowerCase()));
+  let reply = null;
+  let bounced = false;
+  for (const m of thread?.messages || []) {
+    const from = headerOf(m, 'From');
+    const addr = emailOf(from);
+    if (BOUNCE_FROM.test(from) || BOUNCE_SUBJECT.test(headerOf(m, 'Subject'))) { bounced = true; continue; }
+    if (!addr || own.has(addr) || (m.labelIds || []).includes('SENT')) continue;
+    reply = {
+      from,
+      snippet: (m.snippet || '').replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').slice(0, 280),
+      date: m.internalDate ? new Date(Number(m.internalDate)).toISOString() : null,
+      messageId: m.id,
+    };
+  }
+  return { replied: Boolean(reply), bounced: bounced && !reply, reply };
+}
+
+export const gmailThreadUrl = (threadId, account) =>
+  `https://mail.google.com/mail/${account ? `?authuser=${encodeURIComponent(account)}` : 'u/0/'}#all/${threadId}`;
+
+// ---------- browser client ----------
+export class GmailClient {
+  constructor({ clientId, onChange } = {}) {
+    this.clientId = clientId;
+    this.onChange = onChange || (() => {});
+    this.token = null;
+    this.expiresAt = 0;
+    this.email = '';
+    this.tokenClient = null;
+  }
+
+  get connected() { return Boolean(this.token) && Date.now() < this.expiresAt - 60_000; }
+
+  async loadGis() {
+    if (window.google?.accounts?.oauth2) return;
+    await new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://accounts.google.com/gsi/client';
+      s.async = true;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error('Не удалось загрузить вход Google'));
+      document.head.appendChild(s);
+    });
+  }
+
+  /** Must be called from a click (opens Google's popup). */
+  async connect({ hint } = {}) {
+    if (!this.clientId) throw new Error('Не задан Google OAuth Client ID');
+    await this.loadGis();
+    const token = await new Promise((resolve, reject) => {
+      this.tokenClient = window.google.accounts.oauth2.initTokenClient({
+        client_id: this.clientId,
+        scope: GMAIL_SCOPES,
+        hint,
+        callback: (resp) => (resp.error ? reject(new Error(resp.error_description || resp.error)) : resolve(resp)),
+        error_callback: (err) => reject(new Error(err?.message || err?.type || 'Вход отменён')),
+      });
+      this.tokenClient.requestAccessToken({ prompt: this.email ? '' : 'consent' });
+    });
+    if (!window.google.accounts.oauth2.hasGrantedAllScopes(token, ...GMAIL_SCOPES.split(' '))) {
+      throw new Error('Нужно разрешить и отправку, и чтение писем (галочки в окне Google)');
+    }
+    this.token = token.access_token;
+    this.expiresAt = Date.now() + (Number(token.expires_in) || 3600) * 1000;
+    const profile = await this.api('/profile');
+    this.email = (profile.emailAddress || '').toLowerCase();
+    this.onChange();
+    return this.email;
+  }
+
+  disconnect() {
+    if (this.token && window.google?.accounts?.oauth2) window.google.accounts.oauth2.revoke(this.token, () => {});
+    this.token = null;
+    this.expiresAt = 0;
+    this.onChange();
+  }
+
+  async api(path, opts = {}) {
+    if (!this.connected) throw Object.assign(new Error('Сессия Gmail истекла — нажми «Подключить Gmail»'), { code: 'auth' });
+    const res = await fetch(`${API}${path}`, {
+      ...opts,
+      headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json', ...(opts.headers || {}) },
+    });
+    if (res.status === 401) {
+      this.token = null;
+      this.onChange();
+      throw Object.assign(new Error('Сессия Gmail истекла — нажми «Подключить Gmail»'), { code: 'auth' });
+    }
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = json.error?.message || `Gmail HTTP ${res.status}`;
+      throw Object.assign(new Error(msg), { code: res.status === 429 || /limit|quota/i.test(msg) ? 'limit' : 'api', status: res.status });
+    }
+    return json;
+  }
+
+  async send({ to, cc, subject, body, threadId, inReplyTo }) {
+    const raw = buildRawMessage({ to, cc, subject, body, inReplyTo });
+    const res = await this.api('/messages/send', { method: 'POST', body: JSON.stringify(threadId ? { raw, threadId } : { raw }) });
+    return { id: res.id, threadId: res.threadId };
+  }
+
+  async messageIdHeader(messageId) {
+    const m = await this.api(`/messages/${messageId}?format=metadata&metadataHeaders=Message-ID`);
+    return headerOf(m, 'Message-ID');
+  }
+
+  thread(threadId) {
+    return this.api(`/threads/${threadId}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`);
+  }
+}

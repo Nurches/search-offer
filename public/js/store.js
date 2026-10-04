@@ -22,10 +22,11 @@ export const KEYS = {
   templatesPair: 'wt.templates.pair.v1',
   settings: 'wt.settings.v1',
   lastSearch: 'wt.lastSearch.v1',
+  sendLog: 'wt.sendLog.v1',
 };
 
 const LEAD_FIELDS = ['id', 'source', 'name', 'category', 'address', 'city', 'state', 'lat', 'lon', 'phone',
-  'website', 'emails', 'facebook', 'placeId', 'gmapsUrl', 'rating', 'ratingCount', 'fit'];
+  'website', 'emails', 'facebook', 'placeId', 'gmapsUrl', 'rating', 'ratingCount', 'fit', 'gmail', 'reply', 'replySeen'];
 
 export function toSavedLead(lead) {
   const out = {};
@@ -39,7 +40,7 @@ export function toSavedLead(lead) {
   return out;
 }
 
-const STATUS_RANK = { new: 0, skip: 1, emailed: 2, followup: 3, rejected: 4, replied: 5, interview: 6, offer: 7 };
+const STATUS_RANK = { new: 0, skip: 1, emailed: 2, bounced: 2, followup: 3, rejected: 4, replied: 5, interview: 6, offer: 7 };
 
 /** Merges two copies of the same lead (e.g. a friend's backup): furthest status wins, history/emails/notes combine. */
 export function mergeLeads(a, b) {

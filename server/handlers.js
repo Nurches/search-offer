@@ -75,6 +75,8 @@ function wrap(fn) {
 
 export const health = wrap(async (req, res) => send(res, 200, {
   app: 'wt-job-finder', emails: true, places: Boolean(googleKey()),
+  // OAuth client IDs are public by design (they ship to the browser).
+  oauthClientId: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
 }, { 'Cache-Control': 'no-store' }));
 
 export const emails = wrap(async (req, res) => {

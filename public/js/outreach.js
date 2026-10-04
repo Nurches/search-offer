@@ -177,6 +177,7 @@ export const STATUSES = [
   { id: 'interview', label: 'Интервью', color: 'violet' },
   { id: 'offer', label: 'Job offer! 🎉', color: 'green' },
   { id: 'rejected', label: 'Отказ', color: 'red' },
+  { id: 'bounced', label: 'Email не дошёл', color: 'red' },
   { id: 'skip', label: 'Пропустить', color: 'gray' },
 ];
 export const STATUS_BY_ID = Object.fromEntries(STATUSES.map((s) => [s.id, s]));

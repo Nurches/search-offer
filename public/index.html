@@ -21,7 +21,7 @@
     <nav class="tabs" role="tablist">
       <button class="tab active" data-tab="search" role="tab">🔎 Поиск</button>
       <button class="tab" data-tab="hotspots" role="tab">🏖️ Курорты</button>
-      <button class="tab" data-tab="tracker" role="tab">📋 Мои контакты <span class="pill" id="trackerCount">0</span></button>
+      <button class="tab" data-tab="tracker" role="tab">📋 Мои контакты <span class="pill" id="trackerCount">0</span> <span class="pill reply" id="replyBadge" hidden></span></button>
       <button class="tab" data-tab="letter" role="tab">✉️ Письмо и профиль</button>
       <button class="tab" data-tab="rules" role="tab">✅ Правила W&amp;T</button>
     </nav>
@@ -112,6 +112,7 @@
             <div class="bulk">
               <label class="check"><input type="checkbox" id="selectAll"> Выбрать все</label>
               <button class="btn" id="bulkSave" type="button">➕ В мои контакты</button>
+              <button class="btn primary" id="bulkCampaign" type="button">📨 Написать всем выбранным</button>
               <button class="btn" id="bulkEnrich" type="button" hidden>📧 Найти email с сайтов</button>
             </div>
           </div>
@@ -142,6 +143,7 @@
           <h2>Мои контакты</h2>
           <div class="stats" id="trackerStats"></div>
         </div>
+        <div class="gmail-bar" id="gmailBar"></div>
         <div class="tracker-tools">
           <input type="search" id="trackerFilter" placeholder="Поиск…">
           <select id="trackerStatus"><option value="">Все статусы</option></select>
@@ -242,6 +244,12 @@
           <button class="btn" id="apiBaseSave" type="button">Подключить</button>
         </div>
         <p class="hint" id="serverStatus"></p>
+        <h3>Gmail API: рассылка в один клик и отслеживание ответов</h3>
+        <p class="hint">OAuth Client ID (тип «Web application») из Google Cloud. Можно задать на Vercel переменной <code>GOOGLE_OAUTH_CLIENT_ID</code> или вставить сюда. Инструкция в README.</p>
+        <div class="row wrap">
+          <input id="oauthClientInput" type="text" placeholder="1234567890-abc.apps.googleusercontent.com" style="flex:1 1 260px">
+          <button class="btn" id="oauthClientSave" type="button">Сохранить</button>
+        </div>
       </div>
     </section>
 
@@ -356,6 +364,7 @@
       <label class="field"><span>Тема</span><input id="cmSubject"></label>
       <label class="field"><span>Текст</span><textarea id="cmBody" rows="14"></textarea></label>
       <div class="row wrap">
+        <button class="btn primary" id="cmSendApi" type="button" hidden>📨 Отправить сразу</button>
         <a class="btn primary" id="cmGmail" target="_blank" rel="noopener">Открыть в Gmail</a>
         <a class="btn" id="cmMailto">Почтовое приложение</a>
         <button class="btn" id="cmCopy" type="button">Копировать текст</button>
@@ -364,6 +373,54 @@
         <button class="btn" id="cmMarkSent" type="button">✓ Отметить как отправлено</button>
       </div>
       <p class="hint">Gmail откроется с готовым письмом. Проверь его и нажми «Отправить», потом вернись сюда и отметь отправку.</p>
+    </div>
+  </dialog>
+
+  <!-- Campaign modal -->
+  <dialog id="campaignModal" class="modal">
+    <div class="modal-head">
+      <h3 id="cpTitle">📨 Рассылка через Gmail</h3>
+      <button class="icon-btn" data-close aria-label="Закрыть">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="cpSetup" hidden>
+        <p><b>Чтобы сайт сам отправлял письма и видел ответы, нужно один раз подключить Gmail API</b> (тот же Google Cloud проект, что и для Places):</p>
+        <ol class="tips">
+          <li>Google Cloud → APIs &amp; Services → Library → <b>Gmail API</b> → Enable.</li>
+          <li>Google Auth Platform → <b>Branding</b>: название (например, W&amp;T Job Finder) и твой email. <b>Audience</b>: External, режим Testing, в <b>Test users</b> добавь свой Gmail (и подруги, если она будет отправлять со своего).</li>
+          <li><b>Clients → Create client → Web application</b>. В «Authorized JavaScript origins» добавь адрес сайта: <code id="cpOrigin"></code></li>
+          <li>Скопируй <b>Client ID</b> и вставь во вкладке «Письмо и профиль → Сервер → Gmail API» (или в Vercel переменной <code>GOOGLE_OAUTH_CLIENT_ID</code>).</li>
+        </ol>
+        <p class="hint">При входе Google предупредит «приложение не проверено». Это нормально для личного приложения: «Дополнительные настройки → Перейти». Пока Gmail API не подключён, можно отправлять письма по очереди вручную (кнопка «🚀 Рассылка по очереди»).</p>
+      </div>
+      <div id="cpMain">
+        <div class="cp-summary" id="cpSummary"></div>
+        <div class="grid2">
+          <label class="field"><span>Шаблон</span><select id="cpTemplate"></select></label>
+          <label class="field"><span>Пауза между письмами</span>
+            <select id="cpInterval">
+              <option value="30">30–45 секунд</option>
+              <option value="60" selected>1–1,5 минуты (рекомендую)</option>
+              <option value="120">2–3 минуты</option>
+            </select>
+          </label>
+          <label class="field"><span>Лимит писем в день</span><input id="cpDaily" type="number" min="1" max="150" value="40"></label>
+          <label class="field"><span>Сегодня уже отправлено</span><input id="cpToday" disabled></label>
+        </div>
+        <details class="cp-details"><summary>Предпросмотр первого письма</summary><div class="preview" id="cpPreview"></div></details>
+        <label class="check cp-confirm"><input type="checkbox" id="cpConfirm"> Я проверил(а) текст письма, профиль и ссылку на резюме</label>
+        <div class="row wrap">
+          <button class="btn primary" id="cpStart" type="button">🚀 Начать рассылку</button>
+          <button class="btn" id="cpPause" type="button" hidden>⏸ Пауза</button>
+          <button class="btn ghost" id="cpStop" type="button" hidden>⏹ Остановить</button>
+        </div>
+        <div class="cp-progress" id="cpProgress" hidden>
+          <div class="bar"><i id="cpBar"></i></div>
+          <div id="cpStatus" class="small"></div>
+          <ol id="cpLog" class="cp-log"></ol>
+        </div>
+        <p class="hint">Письма уходят с твоего Gmail по одному, каждое на свой адрес, с паузой, чтобы Google не принял их за спам. Не закрывай вкладку, пока идёт рассылка: окно можно закрыть, прогресс виден во вкладке «Мои контакты».</p>
+      </div>
     </div>
   </dialog>
 

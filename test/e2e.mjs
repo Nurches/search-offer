@@ -26,6 +26,7 @@ const outDir = path.resolve('test-results');
 fs.mkdirSync(outDir, { recursive: true });
 
 const { chromium } = await loadPlaywright();
+process.env.GOOGLE_OAUTH_CLIENT_ID = 'test-client.apps.googleusercontent.com';
 const server = createServer().listen(0);
 await new Promise((r) => server.once('listening', r));
 const base = `http://127.0.0.1:${server.address().port}/`;
@@ -146,7 +147,7 @@ try {
   // Tracker + queue
   await page.click('.tab[data-tab="tracker"]');
   assert.equal(await page.locator('.trow').count(), 4);
-  assert.match(await page.textContent('#trackerStats'), /1<\/b>|1 отправлено|отправлено/);
+  assert.match(await page.textContent('#trackerStats'), /1 написали/);
   await page.click('#queueBtn');
   await page.waitForSelector('#composeModal[open]');
   assert.match(await page.textContent('#cmQueue'), /1.*из.*1/s); // only Ocean Breeze is new + has email + fits
@@ -165,6 +166,98 @@ try {
   // Rules tab
   await page.click('.tab[data-tab="rules"]');
   assert.match(await page.textContent('#tab-rules'), /22 CFR 62\.32/);
+
+  // ---- one-click Gmail campaign + reply tracking (Google sign-in and Gmail API mocked) ----
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const g = await ctx.newPage();
+    g.on('pageerror', (e) => errors.push(`pageerror(gmail): ${e.message}`));
+    await ctx.addInitScript(() => {
+      window.__wtTestIntervalSec = 0.05;
+      if (!localStorage.getItem('wt.profile.v1')) {
+        localStorage.setItem('wt.profile.v1', JSON.stringify({ name: 'Test Student', university: 'Test University', studyYear: '2nd-year', resumeLink: 'https://drive.google.com/joint', searchMode: 'pair', partnerName: 'Test Friend', partnerEmail: 'friend@example.org' }));
+      }
+      window.google = { accounts: { oauth2: {
+        initTokenClient: (cfg) => ({ requestAccessToken: () => setTimeout(() => cfg.callback({ access_token: 'tok', expires_in: 3600 }), 10) }),
+        hasGrantedAllScopes: () => true,
+        revoke: () => {},
+      } } };
+    });
+    const sent = [];
+    await g.route('https://tile.openstreetmap.org/**', (r) => r.fulfill({ status: 204, body: '' }));
+    await g.route('**/api/overpass', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(OVERPASS_FIXTURE) }));
+    await g.route('**/api/emails?**', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ emails: ['hr@oceanbreeze.test'], pages: [] }) }));
+    await g.route('https://gmail.googleapis.com/**', async (r) => {
+      const url = new URL(r.request().url());
+      assert.equal(r.request().headers().authorization, 'Bearer tok');
+      const json = (b) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
+      if (url.pathname.endsWith('/profile')) return json({ emailAddress: 'me@example.org' });
+      if (url.pathname.endsWith('/messages/send')) {
+        const raw = JSON.parse(r.request().postData()).raw;
+        sent.push(Buffer.from(raw.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+        return json({ id: `m${sent.length}`, threadId: `t${sent.length}` });
+      }
+      const h = (from, subject = 'Re: Summer jobs') => ({ headers: [{ name: 'From', value: from }, { name: 'Subject', value: subject }] });
+      if (url.pathname.endsWith('/threads/t1')) {
+        return json({ messages: [{ id: 'm1', labelIds: ['SENT'], payload: h('me@example.org') }, { id: 'r1', snippet: 'Hi! Can you do a Zoom call on Monday?', internalDate: String(Date.now()), payload: h('Kate <kate@boardwalkfries.test>') }] });
+      }
+      if (url.pathname.endsWith('/threads/t2')) {
+        return json({ messages: [{ id: 'm2', labelIds: ['SENT'], payload: h('me@example.org') }, { id: 'b1', payload: h('Mail Delivery Subsystem <mailer-daemon@googlemail.com>', 'Delivery Status Notification (Failure)') }] });
+      }
+      return json({ messages: [] });
+    });
+
+    await g.goto(base);
+    await g.waitForFunction(() => window.wt?.state.server.oauthClientId);
+    await g.click('.tab[data-tab="hotspots"]');
+    await g.fill('#hsSearch', 'Ocean City');
+    await g.locator('.hs', { hasText: 'Ocean City, MD' }).locator('[data-hs]').click();
+    await g.waitForSelector('.lead');
+    await g.check('#selectAll');
+    await g.click('#bulkCampaign');
+    await g.waitForSelector('#campaignModal[open]');
+    assert.equal(await g.isVisible('#cpSetup'), false);
+    assert.match(await g.textContent('#cpSummary'), /Готово к отправке: 1/);
+    assert.match(await g.textContent('#cpSummary'), /Не подходят под правила W&T, пропущены: 1/);
+    await g.click('#cpEnrich');
+    await g.waitForFunction(() => /Готово к отправке: 2/.test(document.querySelector('#cpSummary').textContent));
+    assert.match(await g.textContent('#cpPreview'), /Копия: friend@example\.org/);
+    await g.click('#cpStart');
+    assert.equal(sent.length, 0, 'must not send without confirmation');
+    await g.check('#cpConfirm');
+    await g.click('#cpStart');
+    await g.waitForFunction(() => /Готово: отправлено 2/.test(document.querySelector('#cpStatus').textContent), null, { timeout: 15000 });
+    assert.equal(sent.length, 2);
+    assert.match(sent[0], /^To: jobs@boardwalkfries\.test\r\nCc: friend@example\.org\r\nSubject: Summer 2027 Seasonal Jobs for Two/);
+    const body0 = Buffer.from(sent[0].split('\r\n\r\n')[1].replace(/\r\n/g, ''), 'base64').toString('utf8');
+    assert.match(body0, /Dear Boardwalk Fries Hiring Team/);
+    assert.match(body0, /Test Student and Test Friend/);
+    assert.doesNotMatch(body0, /\[(University|Your Name|link to resume)\]/);
+    assert.match(sent[1], /^To: hr@oceanbreeze\.test/);
+    await g.screenshot({ path: path.join(outDir, 'campaign.png') });
+    await g.click('#campaignModal [data-close]');
+
+    // Reply check from the tracker
+    await g.click('.tab[data-tab="tracker"]');
+    assert.match(await g.textContent('#gmailBar'), /Gmail: me@example\.org/);
+    await g.click('#gmailBar [data-gm="check"]');
+    await g.waitForFunction(() => [...window.wt.state.saved.values()].some((l) => l.reply));
+    const st = await g.evaluate(() => Object.fromEntries([...window.wt.state.saved.values()].filter((l) => l.gmail).map((l) => [l.name, l.status])));
+    assert.deepEqual(st, { 'Boardwalk Fries': 'replied', 'Ocean Breeze Hotel': 'bounced' });
+    const row = g.locator('.trow', { hasText: 'Boardwalk Fries' });
+    assert.match(await row.locator('.reply-box').textContent(), /Новый ответ!.*Kate.*Zoom call on Monday/s);
+    assert.match(await row.locator('a', { hasText: 'Переписка в Gmail' }).getAttribute('href'), /#all\/t1$/);
+    assert.match(await g.locator('.trow', { hasText: 'Ocean Breeze Hotel' }).textContent(), /Письмо не дошло/);
+    assert.match(await g.textContent('#replyBadge'), /💬 1/);
+    await g.screenshot({ path: path.join(outDir, 'replies.png') });
+    // Visiting the tracker marks replies as seen
+    await g.click('.tab[data-tab="search"]');
+    await g.click('.tab[data-tab="tracker"]');
+    assert.equal(await g.isHidden('#replyBadge'), true);
+    // Daily counter
+    assert.equal(await g.evaluate(() => JSON.parse(localStorage.getItem('wt.sendLog.v1')).count), 2);
+    await ctx.close();
+  }
 
   // ---- mobile, static mode (no server), manual city via autocomplete ----
   const m = await newPage({ width: 390, height: 844 }, { withServer: false });

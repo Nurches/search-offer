@@ -1,0 +1,51 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { buildRawMessage, encodeHeader, analyzeThread, emailOf, gmailThreadUrl } from '../../public/js/gmail.js';
+
+const fromB64Url = (s) => Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+
+test('buildRawMessage produces a valid UTF-8 MIME message', () => {
+  const raw = buildRawMessage({
+    to: 'jobs@hotel.com', cc: 'friend@example.org', subject: 'Summer 2027 – J-1 students',
+    body: 'Dear Hotel,\nWe are students from Kazakhstan — Алматы.\n', inReplyTo: '<abc@mail.gmail.com>',
+  });
+  assert.doesNotMatch(raw, /[+/=]/);
+  const msg = fromB64Url(raw);
+  const [head, bodyB64] = msg.split('\r\n\r\n');
+  assert.match(head, /^To: jobs@hotel\.com\r\nCc: friend@example\.org\r\nSubject: =\?UTF-8\?B\?/);
+  assert.match(head, /In-Reply-To: <abc@mail\.gmail\.com>\r\nReferences: <abc@mail\.gmail\.com>/);
+  assert.match(head, /Content-Type: text\/plain; charset="UTF-8"/);
+  const subjB64 = head.match(/Subject: =\?UTF-8\?B\?([^?]+)\?=/)[1];
+  assert.equal(Buffer.from(subjB64, 'base64').toString('utf8'), 'Summer 2027 – J-1 students');
+  const body = Buffer.from(bodyB64.replace(/\r\n/g, ''), 'base64').toString('utf8');
+  assert.equal(body, 'Dear Hotel,\r\nWe are students from Kazakhstan — Алматы.\r\n');
+  assert.ok(bodyB64.split('\r\n').every((line) => line.length <= 76));
+});
+
+test('headers cannot be injected and ASCII subjects stay plain', () => {
+  const msg = fromB64Url(buildRawMessage({ to: 'a@b.com\r\nBcc: evil@x.com', subject: 'Hi', body: 'x' }));
+  assert.doesNotMatch(msg, /\r\nBcc:/);
+  assert.equal(encodeHeader('Plain subject'), 'Plain subject');
+});
+
+const msg = (from, { labels = [], snippet = '', subject = 'Re: Summer jobs', id = 'm' } = {}) => ({
+  id, labelIds: labels, snippet, internalDate: '1791100000000',
+  payload: { headers: [{ name: 'From', value: from }, { name: 'Subject', value: subject }] },
+});
+
+test('analyzeThread detects employer replies, ignores own and partner messages', () => {
+  const own = ['me@gmail.com', 'friend@example.org'];
+  assert.deepEqual(analyzeThread({ messages: [msg('Me <me@gmail.com>', { labels: ['SENT'] })] }, own), { replied: false, bounced: false, reply: null });
+  assert.equal(analyzeThread({ messages: [msg('Me <me@gmail.com>', { labels: ['SENT'] }), msg('Friend <friend@example.org>')] }, own).replied, false);
+  const r = analyzeThread({ messages: [msg('me@gmail.com', { labels: ['SENT'] }), msg('Kate HR <kate@hotel.com>', { snippet: 'Hi! We&#39;d love to talk', id: 'r1' })] }, own);
+  assert.equal(r.replied, true);
+  assert.equal(r.reply.snippet, "Hi! We'd love to talk");
+  assert.equal(r.reply.messageId, 'r1');
+  assert.equal(emailOf('Kate HR <Kate@Hotel.com>'), 'kate@hotel.com');
+});
+
+test('analyzeThread detects bounces', () => {
+  const b = analyzeThread({ messages: [msg('me@gmail.com', { labels: ['SENT'] }), msg('Mail Delivery Subsystem <mailer-daemon@googlemail.com>', { subject: 'Delivery Status Notification (Failure)' })] }, ['me@gmail.com']);
+  assert.deepEqual([b.replied, b.bounced], [false, true]);
+  assert.match(gmailThreadUrl('18c2f', 'me@gmail.com'), /authuser=me%40gmail\.com#all\/18c2f$/);
+});

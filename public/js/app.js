@@ -7,6 +7,7 @@ import {
   DEFAULT_PROFILE, DEFAULT_TEMPLATES, DEFAULT_TEMPLATES_PAIR, defaultTemplatesFor, partnerCc, SOLO_EXPERIENCE, PAIR_EXPERIENCE, STATUSES, STATUS_BY_ID, composeEmail, emailSearchUrl, gmailComposeUrl,
   googleMapsEmbedUrl, googleMapsSearchUrl, googleMapsUrl, jobBoardLinks, mailtoUrl,
 } from './outreach.js';
+import { GmailClient, analyzeThread, gmailThreadUrl } from './gmail.js';
 import { KEYS, download, leadsToCsv, load, mergeLeads as mergeSavedLeads, save, toSavedLead } from './store.js';
 
 // ---------- helpers ----------
@@ -69,7 +70,7 @@ async function detectServer() {
       if (!res.ok) continue;
       const j = await res.json();
       if (j?.app === 'wt-job-finder') {
-        state.server = { ok: true, places: !!j.places, emails: !!j.emails, base };
+        state.server = { ok: true, places: !!j.places, emails: !!j.emails, base, oauthClientId: j.oauthClientId || '' };
         break;
       }
     } catch { /* static hosting: no server */ }
@@ -82,6 +83,8 @@ async function detectServer() {
     ? `Сервер подключён${s.emails ? ': email ищутся на сайтах заведений' : ''}${s.places ? ', доступен Google Places' : ''}.`
     : 'Данные: OpenStreetMap. Каждое место можно сразу открыть в Google Maps. Поиск email на сайтах работает, если запущен сервер (см. README).';
   renderServerStatus();
+  renderGmailBar();
+  $('#cmSendApi').hidden = !oauthClientId();
 }
 
 // ---------- tabs ----------
@@ -89,7 +92,7 @@ function showTab(id) {
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === id));
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === `tab-${id}`));
   if (id === 'search') setTimeout(() => map?.invalidateSize(), 50);
-  if (id === 'tracker') renderTracker();
+  if (id === 'tracker') { renderTracker(); markRepliesSeen(); }
   if (id === 'letter') renderTemplateEditor();
   history.replaceState(null, '', `#${id}`);
 }
@@ -664,6 +667,7 @@ function initCompose() {
     try { await navigator.clipboard.writeText(`${$('#cmSubject').value}\n\n${$('#cmBody').value}`); toast('Скопировано'); } catch { toast('Не удалось скопировать'); }
   });
   $('#cmMarkSent').addEventListener('click', markSent);
+  $('#cmSendApi').addEventListener('click', sendFromCompose);
   $('#cmSkip').addEventListener('click', () => {
     if (compose.lead && state.saved.has(compose.lead.id)) {
       const s = state.saved.get(compose.lead.id);
@@ -828,8 +832,9 @@ function renderTracker() {
   $('#trackerStats').innerHTML = `
     <span class="stat"><b>${all.length}</b> всего</span>
     <span class="stat"><b>${all.filter((l) => l.emails?.length).length}</b> с email</span>
-    <span class="stat"><b>${counts.emailed + counts.followup}</b> отправлено</span>
+    <span class="stat"><b>${all.filter((l) => emailCount(l) > 0).length}</b> написали</span>
     <span class="stat"><b>${counts.replied + counts.interview}</b> ответили</span>
+    ${counts.bounced ? `<span class="stat warn"><b>${counts.bounced}</b> не дошло</span>` : ''}
     <span class="stat good"><b>${counts.offer}</b> офферов</span>
     ${due ? `<span class="stat warn"><b>${due}</b> пора напомнить</span>` : ''}`;
 
@@ -848,18 +853,22 @@ function renderTracker() {
     const cat = CATEGORY_BY_ID[l.category];
     const dueNow = isFollowupDue(l);
     return `
-    <div class="trow fit-${l.fit?.level || 'ok'} ${dueNow ? 'due' : ''}" data-id="${esc(l.id)}">
+    <div class="trow fit-${l.fit?.level || 'ok'} ${dueNow ? 'due' : ''} ${l.reply && !l.replySeen ? 'has-new-reply' : ''}" data-id="${esc(l.id)}">
       <div class="trow-main">
         <div class="lead-top">
           <h4>${cat?.icon || ''} ${esc(l.name)}</h4>
           <span class="badge fit-${l.fit?.level}">${FIT_LABEL[l.fit?.level] || ''}</span>
           ${dueNow ? '<span class="badge st-amber">Пора напомнить</span>' : ''}
+          ${l.status && l.status !== 'new' ? `<span class="badge st-${STATUS_BY_ID[l.status]?.color || 'gray'}">${esc(STATUS_BY_ID[l.status]?.label || l.status)}</span>` : ''}
         </div>
         <div class="lead-meta">
           <span>${esc([l.city, l.state].filter(Boolean).join(', '))}</span>
           ${l.lastContactAt ? `<span>Последнее письмо: ${new Date(l.lastContactAt).toLocaleDateString('ru-RU')}</span>` : ''}
           ${emailCount(l) ? `<span>Писем: ${emailCount(l)}</span>` : ''}
+          ${l.gmail?.threadId ? `<a href="${esc(gmailThreadUrl(l.gmail.threadId, l.gmail.account))}" target="_blank" rel="noopener">Переписка в Gmail ↗</a>` : ''}
         </div>
+        ${l.reply ? `<div class="reply-box ${l.replySeen ? '' : 'new'}">💬 <b>${l.replySeen ? 'Ответ' : 'Новый ответ!'}</b> от ${esc(l.reply.from)}${l.reply.date ? ` · ${new Date(l.reply.date).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : ''}<br>«${esc(l.reply.snippet)}»</div>` : ''}
+        ${l.status === 'bounced' ? '<div class="lead-note">Письмо не дошло: адрес неверный или ящик закрыт. Найди другой email (сайт, Facebook) или позвони.</div>' : ''}
         <div class="lead-contacts">
           ${(l.emails || []).map((e) => `<span class="contact email">✉️ ${esc(e)}</span>`).join('') || '<span class="muted small">email нет</span>'}
           ${l.phone ? `<a class="contact" href="tel:${esc(l.phone.replace(/[^\d+]/g, ''))}">📞 ${esc(l.phone)}</a>` : ''}
@@ -994,6 +1003,16 @@ function renderServerStatus() {
 }
 
 function initSettings() {
+  const oauthInput = $('#oauthClientInput');
+  oauthInput.value = state.settings.oauthClientId || '';
+  $('#oauthClientSave').addEventListener('click', () => {
+    state.settings.oauthClientId = oauthInput.value.trim();
+    save(KEYS.settings, state.settings);
+    gmail.clientId = oauthClientId();
+    renderGmailBar();
+    $('#cmSendApi').hidden = !oauthClientId();
+    toast(oauthClientId() ? 'Client ID сохранён. Подключи Gmail во вкладке «Мои контакты»' : 'Client ID очищен');
+  });
   const input = $('#apiBaseInput');
   if (!input) return;
   input.value = state.settings.apiBase || '';
@@ -1051,6 +1070,330 @@ function renderHotspots() {
     </article>`).join('') || '<div class="empty">Ничего не найдено.</div>';
 }
 
+
+// ---------- Gmail API: one-click sending + reply tracking ----------
+const gmail = new GmailClient({ onChange: () => renderGmailBar() });
+const camp = { running: false, paused: false, stop: false, ids: [], index: 0, kind: 'cold', done: 0, failed: 0 };
+const REPLY_CHECK_MS = 10 * 60 * 1000;
+let replyTimer = null;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const oauthClientId = () => (state.settings.oauthClientId || '').trim() || state.server.oauthClientId || '';
+const todayKey = () => new Date().toLocaleDateString('sv'); // YYYY-MM-DD, local day
+function sentToday() { const log = load(KEYS.sendLog, {}); return log.date === todayKey() ? log.count : 0; }
+function bumpSent() { save(KEYS.sendLog, { date: todayKey(), count: sentToday() + 1 }); }
+const ownAddresses = () => [gmail.email, state.profile.email, state.profile.partnerEmail, state.profile.gmailAccount];
+
+async function connectGmail() {
+  gmail.clientId = oauthClientId();
+  if (!gmail.clientId) { openCampaign('cold'); return false; }
+  try {
+    const email = await gmail.connect({ hint: state.profile.gmailAccount || state.profile.email || undefined });
+    toast(`Gmail подключён: ${email}`);
+    if (!replyTimer) replyTimer = setInterval(() => { if (gmail.connected && !camp.running) checkReplies({ quiet: true }); }, REPLY_CHECK_MS);
+    checkReplies({ quiet: true });
+    return true;
+  } catch (e) {
+    toast(`Gmail: ${e.message}`, 6000);
+    return false;
+  }
+}
+
+function renderGmailBar() {
+  const bar = $('#gmailBar');
+  if (!bar) return;
+  const configured = Boolean(oauthClientId());
+  const unseen = [...state.saved.values()].filter((l) => l.reply && !l.replySeen).length;
+  bar.innerHTML = `
+    <span class="gm-status ${gmail.connected ? 'on' : ''}">${gmail.connected ? `✅ Gmail: ${esc(gmail.email)}` : configured ? '⚪ Gmail не подключён' : '⚪ Gmail API не настроен'}</span>
+    ${gmail.connected ? '' : '<button class="btn sm" data-gm="connect" type="button">🔐 Подключить Gmail</button>'}
+    <button class="btn sm primary" data-gm="campaign" type="button">📨 Отправить всем</button>
+    <button class="btn sm" data-gm="followups" type="button">🔁 Напомнить всем</button>
+    <button class="btn sm" data-gm="check" type="button">🔄 Проверить ответы</button>
+    ${state.lastReplyCheck ? `<span class="muted small">проверено в ${new Date(state.lastReplyCheck).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</span>` : ''}
+    ${camp.running ? `<span class="badge st-blue">Идёт рассылка: ${camp.done} из ${camp.ids.length}</span>` : ''}`;
+  const badge = $('#replyBadge');
+  badge.hidden = !unseen;
+  badge.textContent = `💬 ${unseen}`;
+}
+
+function initGmail() {
+  $('#gmailBar').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-gm]');
+    if (!b) return;
+    const act = b.dataset.gm;
+    if (act === 'connect') await connectGmail();
+    if (act === 'campaign') openCampaign('cold');
+    if (act === 'followups') openCampaign('followup');
+    if (act === 'check') await checkReplies();
+  });
+  $('#bulkCampaign').addEventListener('click', () => {
+    const picked = state.results.filter((l) => state.selected.has(l.id));
+    if (!picked.length) { toast('Отметь заведения галочками или нажми «Выбрать все»'); return; }
+    picked.forEach((l) => saveLead(l));
+    renderResults();
+    openCampaign('cold', picked.map((l) => l.id));
+  });
+  $('#cpTemplate').addEventListener('change', renderCampaignPreview);
+  $('#cpStart').addEventListener('click', startCampaign);
+  $('#cpPause').addEventListener('click', async () => {
+    if (camp.paused) {
+      if (!gmail.connected && !(await connectGmail())) return;
+      camp.paused = false;
+    } else camp.paused = true;
+    renderCampaignControls();
+  });
+  $('#cpStop').addEventListener('click', () => { camp.stop = true; camp.paused = false; renderCampaignControls(); });
+  $('#cpOrigin').textContent = location.origin;
+  renderGmailBar();
+}
+
+function campaignPool(kind, onlyIds) {
+  const pool = onlyIds ? onlyIds.map((id) => state.saved.get(id)).filter(Boolean) : [...state.saved.values()];
+  const ready = pool.filter((l) => l.emails?.length && l.fit?.level !== 'bad'
+    && (kind === 'followup' ? isFollowupDue(l) : l.status === 'new' && !l.gmail?.threadId));
+  return {
+    pool,
+    ready,
+    noEmail: pool.filter((l) => !l.emails?.length && l.status === 'new'),
+    bad: pool.filter((l) => l.fit?.level === 'bad'),
+    already: pool.filter((l) => l.status !== 'new' && kind !== 'followup'),
+  };
+}
+
+function openCampaign(kind, onlyIds) {
+  const modal = $('#campaignModal');
+  if (camp.running) { renderCampaignControls(); if (!modal.open) modal.showModal(); return; }
+  const configured = Boolean(oauthClientId());
+  $('#cpSetup').hidden = configured;
+  $('#cpMain').hidden = !configured;
+  camp.kind = kind;
+  camp.onlyIds = onlyIds || null;
+  $('#cpTitle').textContent = kind === 'followup' ? '🔁 Напоминания через Gmail' : '📨 Рассылка через Gmail';
+  $('#cpTemplate').innerHTML = Object.entries(tpls()).map(([id, t]) => `<option value="${id}">${esc(t.label)}</option>`).join('');
+  $('#cpTemplate').value = kind === 'followup' ? 'followup' : 'cold';
+  $('#cpToday').value = sentToday();
+  $('#cpConfirm').checked = false;
+  $('#cpProgress').hidden = true;
+  $('#cpLog').innerHTML = '';
+  renderCampaignSummary();
+  renderCampaignControls();
+  if (!modal.open) modal.showModal();
+}
+
+function renderCampaignSummary() {
+  const { ready, noEmail, bad, already } = campaignPool(camp.kind, camp.onlyIds);
+  camp.ids = ready.map((l) => l.id);
+  const left = Math.max(0, (Number($('#cpDaily').value) || 40) - sentToday());
+  $('#cpSummary').innerHTML = camp.kind === 'followup'
+    ? `Напоминание получат <b>${ready.length}</b>: тем, кому писали ${FOLLOWUP_DAYS}+ дней назад и кто не ответил. Письмо уйдёт ответом в ту же ветку.`
+    : `<b>Готово к отправке: ${ready.length}</b> (есть email, ещё не писали, подходят под W&amp;T).
+      <ul>
+        ${noEmail.length ? `<li>Без email: ${noEmail.length}. ${state.server.emails ? '<button class="btn sm" type="button" id="cpEnrich">📧 Найти email на их сайтах</button>' : 'Найди email вручную (кнопка «Найти email»).'}</li>` : ''}
+        ${bad.length ? `<li>Не подходят под правила W&amp;T, пропущены: ${bad.length}</li>` : ''}
+        ${already.length ? `<li>Уже писали раньше, пропущены: ${already.length}</li>` : ''}
+        ${ready.length > left ? `<li>Сегодня можно ещё <b>${left}</b>, остальные отправятся завтра той же кнопкой.</li>` : ''}
+      </ul>`;
+  $('#cpEnrich')?.addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    e.target.textContent = 'Ищу…';
+    await enrichMany(noEmail);
+    renderCampaignSummary();
+    renderCampaignPreview();
+  });
+  renderCampaignPreview();
+}
+
+function renderCampaignPreview() {
+  const lead = state.saved.get(camp.ids[0]);
+  if (!lead) { $('#cpPreview').innerHTML = '<span class="muted">Некому отправлять.</span>'; return; }
+  const { subject, body } = composeEmail(tpls(), $('#cpTemplate').value, state.profile, lead);
+  const cc = partnerCc(state.profile);
+  $('#cpPreview').innerHTML = `<div class="pv-subject"><b>Кому:</b> ${esc(lead.emails[0])}${cc ? ` · <b>Копия:</b> ${esc(cc)}` : ''}</div><div class="pv-subject"><b>Тема:</b> ${esc(subject)}</div><pre>${esc(body)}</pre>`;
+}
+
+function renderCampaignControls() {
+  $('#cpStart').hidden = camp.running;
+  $('#cpPause').hidden = !camp.running;
+  $('#cpStop').hidden = !camp.running;
+  $('#cpPause').textContent = camp.paused ? '▶️ Продолжить' : '⏸ Пауза';
+  $('#cpTemplate').disabled = camp.running;
+  const total = camp.ids.length || 1;
+  $('#cpBar').style.width = `${Math.min(100, Math.round(((camp.done + camp.failed) / total) * 100))}%`;
+  renderGmailBar();
+}
+
+function campaignStatus(text) { $('#cpStatus').innerHTML = text; }
+function campaignLog(text, err = false) {
+  const li = document.createElement('li');
+  li.textContent = text;
+  if (err) li.className = 'err';
+  $('#cpLog').prepend(li);
+}
+
+async function startCampaign() {
+  if (!camp.ids.length) { toast('Некому отправлять'); return; }
+  if (!$('#cpConfirm').checked) { toast('Поставь галочку, что проверил(а) письмо'); return; }
+  const first = composeEmail(tpls(), $('#cpTemplate').value, state.profile, state.saved.get(camp.ids[0]));
+  const missing = [...new Set(`${first.subject}\n${first.body}`.match(/\[(Your Name|University|2nd-year|link to resume|Friend's Name)\]/g) || [])];
+  if (missing.length) { toast(`В письме не заполнено: ${missing.join(', ')}. Заполни во вкладке «Письмо и профиль»`, 7000); return; }
+  if (!gmail.connected && !(await connectGmail())) return;
+  Object.assign(camp, { running: true, paused: false, stop: false, index: 0, done: 0, failed: 0, templateId: $('#cpTemplate').value });
+  $('#cpProgress').hidden = false;
+  renderCampaignControls();
+  try {
+    await runCampaign();
+  } finally {
+    camp.running = false;
+    $('#cpSummary').innerHTML = `Отправлено писем: <b>${camp.done}</b>${camp.failed ? `, ошибок: ${camp.failed}` : ''}. Окно можно закрыть: ответы появятся во вкладке «Мои контакты» (проверка каждые 10 минут, пока сайт открыт, или кнопкой «🔄 Проверить ответы»).`;
+    $('#cpToday').value = sentToday();
+    renderCampaignControls();
+    renderTrackerIfVisible();
+    renderResults();
+  }
+}
+
+async function runCampaign() {
+  const base = window.__wtTestIntervalSec ?? (Number($('#cpInterval').value) || 60);
+  const daily = Number($('#cpDaily').value) || 40;
+  while (camp.index < camp.ids.length) {
+    if (camp.stop) { campaignStatus(`Остановлено. Отправлено ${camp.done}.`); return; }
+    if (camp.paused) { campaignStatus(`⏸ Пауза. Отправлено ${camp.done} из ${camp.ids.length}.`); await sleep(500); continue; }
+    if (sentToday() >= daily) {
+      campaignStatus(`Дневной лимит ${daily} писем достигнут. Отправлено ${camp.done}. Остальные (${camp.ids.length - camp.index}) отправь завтра той же кнопкой.`);
+      return;
+    }
+    const lead = state.saved.get(camp.ids[camp.index]);
+    if (!lead?.emails?.length) { camp.index += 1; continue; }
+    campaignStatus(`Отправляю ${camp.index + 1} из ${camp.ids.length}: ${esc(lead.name)}…`);
+    try {
+      await sendLeadEmail(lead, camp.templateId);
+      camp.done += 1;
+      camp.index += 1;
+      campaignLog(`✓ ${lead.name} → ${lead.emails[0]}`);
+    } catch (e) {
+      if (e.code === 'auth') { camp.paused = true; renderCampaignControls(); campaignLog(`⏸ ${e.message}`, true); continue; }
+      if (e.code === 'limit') { campaignLog(`⛔ Gmail ограничил отправку: ${e.message}`, true); campaignStatus('Gmail временно ограничил отправку. Продолжи завтра.'); return; }
+      camp.failed += 1;
+      camp.index += 1;
+      campaignLog(`✕ ${lead.name}: ${e.message}`, true);
+    }
+    renderCampaignControls();
+    if (camp.index < camp.ids.length) {
+      const waitMs = (base + Math.random() * base * 0.5) * 1000;
+      const until = Date.now() + waitMs;
+      while (Date.now() < until && !camp.stop) {
+        if (!camp.paused) campaignStatus(`Отправлено ${camp.done} из ${camp.ids.length}. Следующее через ${Math.ceil((until - Date.now()) / 1000)} сек…`);
+        await sleep(camp.paused ? 500 : 1000);
+        if (camp.paused) break;
+      }
+    }
+  }
+  campaignStatus(`✅ Готово: отправлено ${camp.done}${camp.failed ? `, ошибок ${camp.failed}` : ''}. Ответы будут появляться во вкладке «Мои контакты».`);
+  toast(`Рассылка завершена: ${camp.done} писем`);
+}
+
+/** Sends one email through the Gmail API and records the thread on the lead. */
+async function sendLeadEmail(lead, templateId, override = null) {
+  const composed = override || composeEmail(tpls(), templateId, state.profile, lead);
+  const to = override?.to || lead.emails[0];
+  const cc = override ? override.cc : partnerCc(state.profile);
+  let { subject } = composed;
+  let threadId;
+  let inReplyTo;
+  if (templateId === 'followup' && lead.gmail?.threadId) {
+    threadId = lead.gmail.threadId;
+    inReplyTo = await gmail.messageIdHeader(lead.gmail.messageId).catch(() => '');
+    if (lead.gmail.subject) subject = /^re:/i.test(lead.gmail.subject) ? lead.gmail.subject : `Re: ${lead.gmail.subject}`;
+  }
+  const r = await gmail.send({ to, cc, subject, body: composed.body, threadId, inReplyTo });
+  bumpSent();
+  const now = new Date().toISOString();
+  const saved = saveLead(lead);
+  saved.gmail = threadId
+    ? { ...saved.gmail, threadId: r.threadId }
+    : { threadId: r.threadId, messageId: r.id, subject, account: gmail.email };
+  saved.status = templateId === 'followup' ? 'followup' : 'emailed';
+  saved.lastContactAt = now;
+  saved.history = [...(saved.history || []), { at: now, action: templateId, to, via: 'gmail-api' }];
+  Object.assign(lead, { gmail: saved.gmail, status: saved.status });
+  persistLeads();
+  return saved;
+}
+
+async function sendFromCompose() {
+  const lead = compose.lead;
+  if (!lead) return;
+  const to = $('#cmTo').value.trim();
+  if (!to) { toast('Укажи email получателя'); return; }
+  if (!gmail.connected && !(await connectGmail())) return;
+  const btn = $('#cmSendApi');
+  btn.disabled = true;
+  btn.textContent = 'Отправляю…';
+  try {
+    await sendLeadEmail(lead, $('#cmTemplate').value, { to, cc: $('#cmCc').value.trim(), subject: $('#cmSubject').value, body: $('#cmBody').value });
+    toast(`Отправлено: ${lead.name} ✓`);
+    renderResults();
+    if (compose.queue) nextInQueue(); else $('#composeModal').close();
+  } catch (e) {
+    toast(`Не отправлено: ${e.message}`, 6000);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '📨 Отправить сразу';
+  }
+}
+
+async function checkReplies({ quiet = false } = {}) {
+  if (!gmail.connected) {
+    if (quiet || !(await connectGmail())) return;
+  }
+  const leads = [...state.saved.values()].filter((l) => l.gmail?.threadId && !['offer', 'rejected', 'skip'].includes(l.status));
+  let fresh = 0;
+  let bounced = 0;
+  const queue = [...leads];
+  const worker = async () => {
+    while (queue.length) {
+      const l = queue.shift();
+      try {
+        const a = analyzeThread(await gmail.thread(l.gmail.threadId), ownAddresses());
+        const now = new Date().toISOString();
+        if (a.replied && l.reply?.messageId !== a.reply.messageId) {
+          l.reply = a.reply;
+          l.replySeen = false;
+          if (['new', 'emailed', 'followup', 'bounced'].includes(l.status)) l.status = 'replied';
+          l.history = [...(l.history || []), { at: now, action: 'status:replied', via: 'gmail-check' }];
+          fresh += 1;
+        } else if (a.bounced && l.status !== 'bounced' && !l.reply) {
+          l.status = 'bounced';
+          l.history = [...(l.history || []), { at: now, action: 'status:bounced', via: 'gmail-check' }];
+          bounced += 1;
+        }
+      } catch (e) {
+        if (e.code === 'auth') { queue.length = 0; if (!quiet) toast(e.message); }
+      }
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  state.lastReplyCheck = Date.now();
+  persistLeads();
+  renderTrackerIfVisible();
+  renderResults();
+  renderGmailBar();
+  if (fresh) {
+    toast(`💬 Новых ответов: ${fresh}! Смотри «Мои контакты»`, 6000);
+    document.title = `(${fresh}) 💬 W&T Job Finder`;
+  } else if (!quiet) {
+    toast(bounced ? `Новых ответов нет. Не дошло писем: ${bounced}` : `Новых ответов нет (проверено ${leads.length})`);
+  }
+}
+
+function markRepliesSeen() {
+  let changed = false;
+  for (const l of state.saved.values()) if (l.reply && !l.replySeen) { l.replySeen = true; changed = true; }
+  if (changed) { persistLeads(); renderGmailBar(); }
+  document.title = 'W&T Job Finder';
+}
+
 // ---------- boot ----------
 function boot() {
   $$('dialog [data-close]').forEach((b) => b.addEventListener('click', () => b.closest('dialog').close()));
@@ -1063,6 +1406,7 @@ function boot() {
   initProfile();
   initSettings();
   initHotspots();
+  initGmail();
   initTabs();
   persistLeads();
   detectServer();
