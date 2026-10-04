@@ -128,3 +128,48 @@ test('server: health, static, traversal, unknown api', async () => {
     srv.close();
   }
 });
+
+// Vercel calls api/*.js with Node req/res, plus a lazily parsed req.body.
+function fakeRes() {
+  return {
+    status: 0, headers: {}, body: '',
+    writeHead(s, h) { this.status = s; this.headers = h; },
+    end(b) { this.body = b ?? ''; },
+  };
+}
+
+test('vercel functions: health, parsed form body, methods, missing key', async () => {
+  const { default: health } = await import('../../api/health.js');
+  const { default: overpass } = await import('../../api/overpass.js');
+  const { default: places } = await import('../../api/places.js');
+  const { default: emails } = await import('../../api/emails.js');
+  const base = { headers: {}, socket: { remoteAddress: '1.2.3.4' } };
+
+  let res = fakeRes();
+  await health({ ...base, method: 'GET', url: '/api/health' }, res);
+  assert.equal(res.status, 200);
+  assert.equal(JSON.parse(res.body).app, 'wt-job-finder');
+
+  res = fakeRes();
+  await overpass({ ...base, method: 'POST', url: '/api/overpass', body: { data: 'not a query' } }, res);
+  assert.equal(res.status, 400);
+
+  res = fakeRes();
+  await overpass({ ...base, method: 'POST', url: '/api/overpass', body: 'data=nope' }, res);
+  assert.equal(res.status, 400);
+
+  res = fakeRes();
+  await overpass({ ...base, method: 'GET', url: '/api/overpass' }, res);
+  assert.equal(res.status, 405);
+
+  res = fakeRes();
+  await emails({ ...base, method: 'OPTIONS', url: '/api/emails' }, res);
+  assert.equal(res.status, 204);
+
+  const prev = process.env.GOOGLE_MAPS_API_KEY;
+  delete process.env.GOOGLE_MAPS_API_KEY;
+  res = fakeRes();
+  await places({ ...base, method: 'GET', url: '/api/places?q=x' }, res);
+  assert.equal(res.status, 501);
+  if (prev !== undefined) process.env.GOOGLE_MAPS_API_KEY = prev;
+});

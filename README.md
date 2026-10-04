@@ -8,49 +8,54 @@
 - ✉️ **Письма через Gmail, даже если вакансий нет.** Готовые английские шаблоны: холодное письмо, отклик на вакансию, напоминание. Данные из профиля подставляются сами. Кнопка открывает Gmail с готовым письмом, остаётся только нажать «Отправить».
 - 🚀 **Рассылка по очереди.** Письма открываются одно за другим: отправил, отметил, открылось следующее. Через 7 дней кнопка «Пора напомнить» собирает тех, кто не ответил.
 - 📋 **Трекер.** Статусы (отправлено → ответили → интервью → оффер), заметки, экспорт в CSV и бэкап в JSON.
-- 📧 **Поиск email на сайтах** (если запущен сервер). Сервер сам заходит на сайт заведения, страницы Contact и Careers и достаёт email.
+- 📧 **Поиск email на сайтах** (на Vercel или с локальным сервером). Сервер сам заходит на сайт заведения, страницы Contact и Careers и достаёт email.
 
 Профиль, шаблоны и контакты хранятся **только в твоём браузере** (localStorage), в репозиторий ничего не попадает. Делай бэкап JSON время от времени.
 
 ## Как запустить
 
-### Вариант 1. Полная версия на своём компьютере (рекомендую)
+### Вариант 1. Vercel (рекомендую, бесплатно, полная версия)
+
+Сайт и сервер (функции в `api/`) работают на Vercel без настройки. Каждый push в репозиторий деплоится автоматически.
+
+1. Зайди на [vercel.com/new](https://vercel.com/new) через GitHub (Continue with GitHub).
+2. **Import Git Repository** → `Nurches/search-offer` → **Import**.
+3. Ничего не меняй (Framework Preset: Other, настройки берутся из `vercel.json`) → **Deploy**.
+4. Через ~30 секунд будет адрес вида `https://search-offer-xxxx.vercel.app`.
+
+Чтобы включить поиск через Google, добавь ключ: Project → **Settings → Environment Variables** → `GOOGLE_MAPS_API_KEY`, затем **Deployments → … → Redeploy**.
+
+### Вариант 2. На своём компьютере
 
 Нужен [Node.js](https://nodejs.org) 18 или новее. Зависимостей нет, `npm install` не нужен.
 
 ```bash
 git clone https://github.com/Nurches/search-offer.git
 cd search-offer
-npm start
+npm start                                   # http://localhost:3000
+GOOGLE_MAPS_API_KEY=твой_ключ npm start     # с поиском через Google
 ```
 
-Открой http://localhost:3000. Работает всё, включая поиск email на сайтах.
+### Вариант 3. GitHub Pages (только статика)
 
-### Вариант 2. Бесплатно в интернете на GitHub Pages (без сервера)
+Repo → **Settings → Pages → Source: GitHub Actions**, затем запусти workflow `Deploy site to GitHub Pages`. Работает всё, кроме автоматического поиска email на сайтах и Google Places. Адрес сервера (например, Vercel) можно указать во вкладке «Письмо и профиль → Сервер».
 
-1. Влей ветку в `main`.
-2. Repo → **Settings → Pages → Build and deployment → Source: GitHub Actions**.
-3. Workflow `Deploy site to GitHub Pages` опубликует сайт на `https://nurches.github.io/search-offer/`.
+## Ключ Google (необязательно)
 
-Здесь работает поиск через OpenStreetMap, Google Maps, Gmail и трекер. Email с сайтов автоматически не ищутся: вместо этого будет кнопка «Найти email в Google».
+Без ключа сайт ищет через OpenStreetMap: бесплатно, но знает не все заведения. Ссылки «Google Maps» и встроенная карта Google работают **без ключа**. Ключ нужен только для поиска заведений через Google Places, где есть почти всё.
 
-### Вариант 3. Полная версия в интернете (Render, бесплатно)
+**Какой ключ:** API key для **Places API (New)**.
 
-1. На [render.com](https://render.com): **New → Blueprint** → выбери этот репозиторий (используется `render.yaml`).
-2. Открой выданный адрес, например `https://wt-job-finder.onrender.com`.
-3. Если сайт открыт на GitHub Pages, вставь адрес сервера во вкладке «Письмо и профиль → Сервер».
+1. [console.cloud.google.com](https://console.cloud.google.com/) → создай проект.
+2. Подключи платёжный аккаунт (Billing). Google требует карту даже для бесплатного лимита.
+3. **APIs & Services → Library → Places API (New) → Enable**.
+4. **APIs & Services → Credentials → Create credentials → API key**.
+5. В настройках ключа: **API restrictions → Restrict key → Places API (New)**. Ограничение по сайту (referrer) не нужно: ключ хранится на сервере и в браузер не попадает.
+6. Защита от счетов: **Places API (New) → Quotas** → лимит `SearchTextRequest` в день, например 30. Тогда больше этого числа запросов просто не пройдёт.
 
-На бесплатном тарифе сервер «засыпает», и первый запрос после паузы идёт ~30 секунд.
+**Бесплатный лимит.** С марта 2025 года у Google нет общего кредита $200, вместо него бесплатный месячный лимит на каждый тип запроса. Сайт запрашивает сайт, телефон и рейтинг заведения, поэтому запрос относится к уровню **Text Search Enterprise**: около **1 000 бесплатных запросов в месяц**, дальше платно (порядка $35 за 1 000). Один запрос = одна категория (до 20 мест). Поиск по 8 категориям = 8 запросов, то есть примерно **120 поисков в месяц бесплатно**. Цены и лимиты меняются, сверяйся с [официальной страницей](https://developers.google.com/maps/billing-and-pricing/pricing).
 
-### Необязательно: поиск через Google Places
-
-OpenStreetMap бесплатный, но знает не все заведения. Google Maps знает почти все. Чтобы искать через Google:
-
-1. В [Google Cloud Console](https://console.cloud.google.com/) создай проект, включи **Places API (New)** и создай API key.
-2. Запусти сервер с ключом: `GOOGLE_MAPS_API_KEY=твой_ключ npm start` (на Render добавь переменную окружения).
-3. На сайте появится выбор источника: OpenStreetMap / Google Maps / оба.
-
-У Google есть бесплатный месячный лимит запросов, дальше платно. Следи за расходами в консоли.
+`GOOGLE_MAX_PAGES` (1–3, по умолчанию 1): сколько страниц по 20 мест брать на категорию. Больше страниц — больше результатов, но и запросов.
 
 ## Как пользоваться: план на сезон
 
@@ -69,7 +74,9 @@ public/            статический сайт (HTML + ES-модули, бе
   js/search.js     OpenStreetMap (Overpass), геокодинг, оценка «подходит ли под W&T»
   js/outreach.js   шаблоны писем, ссылки Gmail / Google Maps / сайты вакансий
   js/app.js        интерфейс
+api/               функции Vercel (тонкие обёртки над server/handlers.js)
 server/            Node-сервер без зависимостей
+  handlers.js      API: /api/health, /api/emails, /api/overpass, /api/places
   emails.js        поиск email на сайтах (с защитой от SSRF)
   places.js        Google Places API (New)
 test/              юнит-тесты (node --test) и e2e-тест в Chromium
