@@ -64,3 +64,12 @@ test('buildRawMessage attaches files as multipart/mixed', () => {
   assert.equal(Buffer.from(parts[3].split('\r\n\r\n')[1].replace(/\s+/g, ''), 'base64').toString(), '%PDF-1.4 test resume');
   assert.match(parts[4], /^--\s*$/);
 });
+
+test('friendly Google error messages', async () => {
+  const { friendlyGoogleError } = await import('../../public/js/gmail.js');
+  assert.match(friendlyGoogleError('Gmail API has not been used in project 123 before or it is disabled.', 403), /Gmail API не включён/);
+  assert.match(friendlyGoogleError('access_denied'), /Test users/);
+  assert.match(friendlyGoogleError('popup_failed_to_open'), /всплывающие окна/);
+  assert.match(friendlyGoogleError('Request had insufficient authentication scopes. PERMISSION_DENIED', 403), /галочки/);
+  assert.equal(friendlyGoogleError('Something else', 500), 'Something else');
+});

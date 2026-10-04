@@ -313,6 +313,13 @@ try {
     // Reply check from the tracker
     await g.click('.tab[data-tab="tracker"]');
     assert.match(await g.textContent('#gmailBar'), /Gmail: me@example\.org/);
+    // Test email to self: goes to own address, with attachments, not tracked
+    const before = sent.length;
+    await g.click('#gmailBar [data-gm="test"]');
+    await g.waitForFunction((n) => document.querySelector('#toast').textContent.includes('Тестовое письмо'), before);
+    assert.equal(sent.length, before + 1);
+    assert.match(sent[before], /^To: me@example\.org\r\nSubject: =\?UTF-8\?B\?/);
+    assert.match(sent[before], /filename="Resume_Test_Friend\.pdf"/);
     await g.click('#gmailBar [data-gm="check"]');
     await g.waitForFunction(() => [...window.wt.state.saved.values()].some((l) => l.reply));
     const st = await g.evaluate(() => Object.fromEntries([...window.wt.state.saved.values()].filter((l) => l.gmail).map((l) => [l.name, l.status])));

@@ -1297,6 +1297,7 @@ function renderGmailBar() {
     <button class="btn sm primary" data-gm="campaign" type="button">📨 Отправить всем</button>
     <button class="btn sm" data-gm="followups" type="button">🔁 Напомнить всем</button>
     <button class="btn sm" data-gm="check" type="button">🔄 Проверить ответы</button>
+    <button class="btn sm ghost" data-gm="test" type="button" title="Отправить пример письма на свой адрес">✉️ Тестовое письмо себе</button>
     ${state.lastReplyCheck ? `<span class="muted small">проверено в ${new Date(state.lastReplyCheck).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</span>` : ''}
     ${camp.running ? `<span class="badge st-blue">Идёт рассылка: ${camp.done} из ${camp.ids.length}</span>` : ''}`;
   const badge = $('#replyBadge');
@@ -1313,6 +1314,7 @@ function initGmail() {
     if (act === 'campaign') openCampaign('cold');
     if (act === 'followups') openCampaign('followup');
     if (act === 'check') await checkReplies();
+    if (act === 'test') { b.disabled = true; await sendTestEmail(); b.disabled = false; }
   });
   $('#bulkCampaign').addEventListener('click', () => {
     const picked = state.results.filter((l) => state.selected.has(l.id));
@@ -1527,6 +1529,20 @@ async function sendFromCompose() {
   } finally {
     btn.disabled = false;
     btn.textContent = '📨 Отправить сразу';
+  }
+}
+
+/** Sends a sample email (with attachments) to the user's own address. Not recorded in the tracker. */
+async function sendTestEmail() {
+  if (!gmail.connected && !(await connectGmail())) return;
+  const sample = [...state.saved.values()].find((l) => l.emails?.length)
+    || { name: "Thrasher's French Fries", category: 'fastfood', city: 'Ocean City', state: 'MD' };
+  const { subject, body } = composeEmail(tpls(), 'cold', state.profile, sample, { attachments: state.attachments.length });
+  try {
+    await gmail.send({ to: gmail.email, subject: `[ТЕСТ] ${subject}`, body, attachments: state.attachments });
+    toast(`Тестовое письмо отправлено на ${gmail.email}${state.attachments.length ? ` с ${state.attachments.length} вложениями` : ''}. Проверь «Входящие».`, 6000);
+  } catch (e) {
+    toast(`Не отправлено: ${e.message}`, 8000);
   }
 }
 

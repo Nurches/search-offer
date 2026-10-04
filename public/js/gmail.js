@@ -101,6 +101,26 @@ export function analyzeThread(thread, ownAddresses = []) {
 export const gmailThreadUrl = (threadId, account) =>
   `https://mail.google.com/mail/${account ? `?authuser=${encodeURIComponent(account)}` : 'u/0/'}#all/${threadId}`;
 
+/** Turns raw Google errors into actionable Russian messages. */
+export function friendlyGoogleError(raw, status) {
+  const m = String(raw || '');
+  if (/has not been used|is disabled|SERVICE_DISABLED|accessNotConfigured/i.test(m)) {
+    return 'Gmail API не включён в проекте Google Cloud. Включи: APIs & Services → Library → Gmail API → Enable (подожди 1–2 минуты).';
+  }
+  if (/insufficient|scope|PERMISSION_DENIED/i.test(m) && status === 403) {
+    return 'Нет разрешения на отправку или чтение писем. Нажми «Подключить Gmail» ещё раз и отметь все галочки в окне Google.';
+  }
+  if (/access_denied/i.test(m)) {
+    return 'Google не пустил аккаунт. Проверь, что твой Gmail добавлен в Google Auth Platform → Audience → Test users.';
+  }
+  if (/popup_closed/i.test(m)) return 'Окно входа Google закрыто. Попробуй ещё раз.';
+  if (/popup_failed_to_open|popup.*block/i.test(m)) return 'Браузер заблокировал окно входа Google. Разреши всплывающие окна для этого сайта.';
+  if (/invalid_client|idpiframe_initialization_failed|origin/i.test(m)) {
+    return 'Client ID не подходит к этому адресу сайта. В Google Auth Platform → Clients → твой клиент → Authorized JavaScript origins должен быть точный адрес сайта (https://…vercel.app без / в конце).';
+  }
+  return m || `Ошибка Google${status ? ` (HTTP ${status})` : ''}`;
+}
+
 // ---------- browser client ----------
 export class GmailClient {
   constructor({ clientId, onChange } = {}) {
@@ -135,8 +155,8 @@ export class GmailClient {
         client_id: this.clientId,
         scope: GMAIL_SCOPES,
         hint,
-        callback: (resp) => (resp.error ? reject(new Error(resp.error_description || resp.error)) : resolve(resp)),
-        error_callback: (err) => reject(new Error(err?.message || err?.type || 'Вход отменён')),
+        callback: (resp) => (resp.error ? reject(new Error(friendlyGoogleError(`${resp.error} ${resp.error_description || ''}`))) : resolve(resp)),
+        error_callback: (err) => reject(new Error(friendlyGoogleError(err?.type || err?.message || 'popup_closed'))),
       });
       this.tokenClient.requestAccessToken({ prompt: this.email ? '' : 'consent' });
     });
@@ -171,7 +191,8 @@ export class GmailClient {
     }
     const json = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const msg = json.error?.message || `Gmail HTTP ${res.status}`;
+      const rawMsg = `${json.error?.message || ''} ${json.error?.status || ''} ${(json.error?.details || []).map((d) => d.reason || '').join(' ')}`.trim();
+      const msg = friendlyGoogleError(rawMsg || `Gmail HTTP ${res.status}`, res.status);
       throw Object.assign(new Error(msg), { code: res.status === 429 || /limit|quota/i.test(msg) ? 'limit' : 'api', status: res.status });
     }
     return json;
