@@ -29,6 +29,25 @@ const CITY_FIXTURE = { elements: [
 ] };
 const overpassBody = (req) => (decodeURIComponent(req.postData() || '').includes('"place"~') ? CITY_FIXTURE : OVERPASS_FIXTURE);
 
+const JOBS_FIXTURE = {
+  jobs: [
+    { id: 'google:1', source: 'google', title: 'Seasonal Housekeeper', company: 'Ocean Breeze Hotel', location: 'Ocean City, MD', url: 'https://www.linkedin.com/jobs/view/1', description: 'Summer 2027. J-1 Work and Travel students welcome. Employee housing available.', postedAt: '2026-10-01T00:00:00.000Z', salary: '$16 an hour', type: 'Full-time', via: 'LinkedIn', applyOptions: [{ title: 'LinkedIn', url: 'https://www.linkedin.com/jobs/view/1' }, { title: 'Indeed', url: 'https://www.indeed.com/viewjob?jk=1' }] },
+    { id: 'adzuna:2', source: 'adzuna', title: 'Seasonal Housekeeper', company: 'Ocean Breeze Hotel', location: 'Ocean City, Maryland', url: 'https://www.adzuna.com/details/2', description: 'Seasonal housekeeping.', postedAt: '2026-09-28T00:00:00.000Z', salary: '', type: '', via: '', applyOptions: [] },
+    { id: 'jooble:3', source: 'jooble', title: 'Delivery Driver', company: 'Pizza Express', location: 'Dover, DE', url: 'javascript:alert(1)', description: 'Drive our cars.', postedAt: '', salary: '', type: '', via: 'indeed.com', applyOptions: [] },
+    { id: 'boards:4', source: 'boards', title: 'Ride Operator', company: 'Funland', location: 'Rehoboth Beach, DE', url: 'https://jobs.lever.co/funland/4', description: 'Summer season, May–September.', postedAt: '2026-09-15T00:00:00.000Z', salary: '', type: 'Seasonal', via: 'Lever', applyOptions: [] },
+  ],
+  sources: [
+    { id: 'google', label: 'Google Jobs', configured: true, ok: true, count: 1, next: 'NEXT' },
+    { id: 'adzuna', label: 'Adzuna', configured: true, ok: true, count: 1 },
+    { id: 'jooble', label: 'Jooble', configured: true, ok: false, count: 0, error: 'Invalid key' },
+    { id: 'boards', label: 'Boards', configured: true, ok: true, count: 1, boards: 1 },
+  ],
+};
+const JOBS_MORE = {
+  jobs: [{ id: 'google:5', source: 'google', title: 'Server Assistant', company: 'Crab Shack', location: 'Ocean City, MD', url: 'https://g.test/5', description: 'Seasonal summer. International students welcome.', postedAt: '2026-10-02T00:00:00.000Z', salary: '', type: '', via: 'Indeed', applyOptions: [] }],
+  sources: [{ id: 'google', configured: true, ok: true, count: 1, next: null }, { id: 'adzuna', configured: true, ok: true, count: 0, skipped: true }, { id: 'jooble', configured: true, ok: true, count: 0, skipped: true }, { id: 'boards', configured: true, ok: true, count: 0, skipped: true }],
+};
+
 const outDir = path.resolve('test-results');
 fs.mkdirSync(outDir, { recursive: true });
 
@@ -241,6 +260,67 @@ try {
   assert.match(stateQuery, /->\.c;/);
   await page.click('label:has(input[name="mode"][value="around"])');
 
+  // Vacancies: aggregated from several platforms, deduped, checked against W&T rules, saved as contacts
+  const jobRequests = [];
+  await page.route('**/api/jobs', (r) => {
+    const body = JSON.parse(r.request().postData());
+    jobRequests.push(body);
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body.more ? JOBS_MORE : JOBS_FIXTURE) });
+  });
+  await page.click('.tab[data-tab="jobs"]');
+  assert.match(await page.textContent('#jobsSources'), /Ни одна площадка пока не подключена/);
+  assert.match(await page.locator('#jobsLinks a', { hasText: 'Indeed' }).getAttribute('href'), /indeed\.com\/jobs\?q=/);
+  await page.fill('#jobsBoards', 'Funland | https://jobs.lever.co/funland');
+  await page.click('#jobsBoardsSave');
+  await page.click('#jobsPresets .chip:has-text("J-1")');
+  await page.waitForSelector('#jobsList .job');
+  assert.equal(jobRequests[0].q, 'J-1 seasonal summer');
+  assert.equal(jobRequests[0].where, '');
+  assert.deepEqual(jobRequests[0].boards, ['Funland | https://jobs.lever.co/funland']);
+  assert.equal(await page.locator('#jobsList .job').count(), 3, 'same vacancy from Google and Adzuna merged');
+  const hk = page.locator('.job', { hasText: 'Seasonal Housekeeper' });
+  assert.match(await hk.textContent(), /🌎 J-1/);
+  assert.match(await hk.textContent(), /🏠 жильё/);
+  assert.match(await hk.textContent(), /Google Jobs, Adzuna/);
+  assert.equal(await hk.locator('a', { hasText: 'Откликнуться' }).getAttribute('href'), 'https://www.linkedin.com/jobs/view/1');
+  assert.equal(await hk.locator('a', { hasText: 'Indeed ↗' }).count(), 1);
+  assert.equal(await page.locator('#jobsList .job').first().locator('h4').textContent().then((t) => /Housekeeper/.test(t)), true, 'J-1 + housing first');
+  const driver = page.locator('.job', { hasText: 'Delivery Driver' });
+  assert.equal(await driver.evaluate((el) => el.classList.contains('fit-bad')), true);
+  assert.equal(await driver.locator('a', { hasText: 'Откликнуться' }).count(), 0, 'javascript: link dropped');
+  assert.match(await page.textContent('#jobsSources'), /Google Jobs · 1/);
+  assert.match(await page.textContent('#jobsSources'), /Jooble: ошибка/);
+  await page.check('#jobsJ1');
+  assert.equal(await page.locator('#jobsList .job').count(), 1);
+  await page.uncheck('#jobsJ1');
+  await page.selectOption('#jobsState', 'DE');
+  assert.equal(await page.locator('#jobsList .job').count(), 2);
+  await page.selectOption('#jobsState', '');
+  // load more (Google next page)
+  await page.click('#jobsMore');
+  await page.waitForSelector('.job:has-text("Server Assistant")');
+  assert.deepEqual(jobRequests[1].cursors, { google: 'NEXT' });
+  assert.equal(jobRequests[1].more, true);
+  assert.equal(await page.isHidden('#jobsMoreRow'), true);
+  await page.screenshot({ path: path.join(outDir, 'jobs.png') });
+  // save as contact → tracker shows the vacancy; letter uses the "vacancy" template with the job title
+  await hk.locator('[data-act="save"]').click();
+  assert.equal(await hk.locator('[data-act="tracker"]').count(), 1);
+  await hk.locator('[data-act="compose"]').click();
+  await page.waitForSelector('#composeModal[open]');
+  assert.equal(await page.inputValue('#cmTemplate'), 'vacancy');
+  assert.equal(await page.inputValue('#cmPosition'), 'Seasonal Housekeeper');
+  assert.match(await page.inputValue('#cmSubject'), /Application for Seasonal Housekeeper/);
+  await page.click('#composeModal [data-close]');
+  await page.click('.tab[data-tab="tracker"]');
+  const jobRow = page.locator('.trow', { hasText: 'Ocean Breeze Hotel' }).filter({ hasText: 'Seasonal Housekeeper' });
+  assert.equal(await jobRow.locator('a', { hasText: 'Seasonal Housekeeper' }).getAttribute('href'), 'https://www.linkedin.com/jobs/view/1');
+  // results survive a reload without a new request
+  await page.reload();
+  await page.click('.tab[data-tab="jobs"]');
+  assert.equal(await page.locator('#jobsList .job').count(), 4);
+  assert.equal(jobRequests.length, 2);
+
   // ---- one-click Gmail campaign + reply tracking (Google sign-in and Gmail API mocked) ----
   {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
@@ -387,6 +467,15 @@ try {
   await m.waitForSelector('.lead');
   const hotelM = m.locator('.lead', { hasText: 'Ocean Breeze Hotel' });
   assert.match(await hotelM.locator('a', { hasText: 'Найти email' }).getAttribute('href'), /google\.com\/search\?q=site%3Aoceanbreeze\.test/);
+  await m.click('.tab[data-tab="jobs"]');
+  assert.match(await m.textContent('#jobsSources'), /Сервер не найден/);
+  await m.click('#jobsBtn');
+  assert.match(await m.textContent('#jobsStatus'), /нужен сервер/);
+  assert.ok(await m.locator('#jobsLinks a').count() >= 10);
+  const jobsOverflow = await m.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  assert.ok(jobsOverflow <= 0, `jobs tab horizontal overflow ${jobsOverflow}px`);
+  await m.screenshot({ path: path.join(outDir, 'jobs-mobile.png'), fullPage: true });
+  await m.click('.tab[data-tab="search"]');
   const overflow = await m.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   assert.ok(overflow <= 0, `horizontal overflow ${overflow}px`);
   await m.screenshot({ path: path.join(outDir, 'search-mobile.png'), fullPage: true });

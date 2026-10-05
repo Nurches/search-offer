@@ -20,6 +20,7 @@
     </div>
     <nav class="tabs" role="tablist">
       <button class="tab active" data-tab="search" role="tab">🔎 Поиск</button>
+      <button class="tab" data-tab="jobs" role="tab">💼 Вакансии</button>
       <button class="tab" data-tab="hotspots" role="tab">🏖️ Курорты</button>
       <button class="tab" data-tab="tracker" role="tab">📋 Мои контакты <span class="pill" id="trackerCount">0</span> <span class="pill reply" id="replyBadge" hidden></span></button>
       <button class="tab" data-tab="letter" role="tab">✉️ Письмо и профиль</button>
@@ -123,6 +124,55 @@
           <div id="status" class="status" role="status" aria-live="polite"></div>
           <div id="results" class="results"></div>
         </div>
+      </div>
+    </section>
+
+    <!-- VACANCIES -->
+    <section class="panel" id="tab-jobs">
+      <div class="card intro">
+        <h2>Вакансии для J-1 по всей Америке</h2>
+        <p>Сайт собирает вакансии сразу с нескольких площадок: Google Jobs (туда попадают Indeed, LinkedIn, Glassdoor, ZipRecruiter, CoolWorks, Snagajob и сайты самих работодателей), Adzuna, Jooble и карьерные страницы работодателей. Отмечает, где упомянуты J-1 / Work and Travel, жильё и сезонность, и проверяет вакансию по правилам W&amp;T.</p>
+        <form id="jobsForm" class="jobs-form" autocomplete="off">
+          <input type="search" id="jobsQuery" placeholder="Что искать, например: seasonal housekeeper" aria-label="Что искать">
+          <select id="jobsState" aria-label="Штат"><option value="">🇺🇸 Вся Америка</option></select>
+          <button class="btn primary" type="submit" id="jobsBtn">Найти вакансии</button>
+        </form>
+        <div class="chips" id="jobsPresets"></div>
+        <div class="jobs-sources" id="jobsSources"></div>
+      </div>
+      <div class="results-bar card" id="jobsBar" hidden>
+        <div class="results-summary" id="jobsSummary"></div>
+        <div class="results-tools">
+          <input type="search" id="jobsFilter" placeholder="Фильтр: должность, компания, город…">
+          <select id="jobsFit">
+            <option value="all">Все</option>
+            <option value="ok">✓ Подходит</option>
+            <option value="check">⚠ Уточнить</option>
+            <option value="bad">✕ Не подходит</option>
+          </select>
+          <select id="jobsSource"><option value="">Все источники</option></select>
+          <select id="jobsSort">
+            <option value="relevance">Сначала J-1, жильё, сезонные</option>
+            <option value="date">Сначала новые</option>
+            <option value="company">По компании</option>
+          </select>
+        </div>
+        <div class="bulk">
+          <label class="check"><input type="checkbox" id="jobsJ1"> 🌎 Только где упомянут J-1 / Work and Travel</label>
+          <label class="check"><input type="checkbox" id="jobsHousing"> 🏠 Только где упомянуто жильё</label>
+        </div>
+      </div>
+      <div id="jobsStatus" class="status" role="status" aria-live="polite"></div>
+      <div id="jobsList" class="results"></div>
+      <div class="row jobs-more" id="jobsMoreRow" hidden><button class="btn" id="jobsMore" type="button">Загрузить ещё</button></div>
+      <div class="card jobs-extra">
+        <h3>Искать на других площадках</h3>
+        <p class="hint">У этих сайтов нет открытого API. Ссылки откроют поиск с твоим запросом и штатом.</p>
+        <div class="link-grid" id="jobsLinks"></div>
+        <h3>Карьерные страницы работодателей</h3>
+        <p class="hint">Ссылки на страницы вакансий работодателей на Greenhouse, Lever, SmartRecruiters, Ashby или Workday (адрес вида <code>boards.greenhouse.io/…</code>, <code>jobs.lever.co/…</code>, <code>….myworkdayjobs.com/…</code>). По одной в строке, можно «Название | ссылка». Сайт проверяет их при каждом поиске. Хранятся только в этом браузере.</p>
+        <textarea id="jobsBoards" rows="4" placeholder="Seaside Resort | https://jobs.lever.co/seaside-resort&#10;https://boards.greenhouse.io/some-company"></textarea>
+        <div class="row wrap"><button class="btn" id="jobsBoardsSave" type="button">Сохранить</button><span class="hint" id="jobsBoardsNote"></span></div>
       </div>
     </section>
 

@@ -11,6 +11,9 @@ import {
   googleMapsEmbedUrl, googleMapsSearchUrl, googleMapsUrl, jobBoardLinks, mailtoUrl, housingLinks,
 } from './outreach.js';
 import { GmailClient, analyzeThread, bounceRecipients, gmailThreadUrl, isBounceMessage } from './gmail.js';
+import {
+  JOB_PRESETS, JOB_SOURCE_LABEL, analyzeJob, dedupeJobs, filterJobs, jobToLead, safeUrl, sortJobs, vacancySearchLinks,
+} from './jobs.js';
 import { KEYS, applyBounce, download, leadsToCsv, load, mergeLeads as mergeSavedLeads, save, toSavedLead } from './store.js';
 
 // ---------- helpers ----------
@@ -65,6 +68,7 @@ const saveTemplates = () => save(mode() === 'pair' ? KEYS.templatesPair : KEYS.t
 function persistLeads() {
   save(KEYS.leads, [...state.saved.values()]);
   $('#trackerCount').textContent = state.saved.size;
+  if ($('#tab-jobs').classList.contains('active')) renderJobs();
 }
 
 // ---------- server detection ----------
@@ -81,7 +85,7 @@ async function detectServer() {
       if (!res.ok) continue;
       const j = await res.json();
       if (j?.app === 'wt-job-finder') {
-        state.server = { ok: true, places: !!j.places, emails: !!j.emails, base, oauthClientId: j.oauthClientId || '' };
+        state.server = { ok: true, places: !!j.places, emails: !!j.emails, base, oauthClientId: j.oauthClientId || '', jobs: j.jobs || null };
         break;
       }
     } catch { /* static hosting: no server */ }
@@ -95,6 +99,7 @@ async function detectServer() {
     : 'Данные: OpenStreetMap. Каждое место можно сразу открыть в Google Maps. Поиск email на сайтах работает, если запущен сервер (см. README).';
   renderServerStatus();
   renderGmailBar();
+  renderJobSources();
   $('#cmSendApi').hidden = !oauthClientId();
 }
 
@@ -105,6 +110,7 @@ function showTab(id) {
   if (id === 'search') setTimeout(() => map?.invalidateSize(), 50);
   if (id === 'tracker') { renderTracker(); markRepliesSeen(); }
   if (id === 'letter') renderTemplateEditor();
+  if (id === 'jobs') renderJobs();
   history.replaceState(null, '', `#${id}`);
 }
 
@@ -824,8 +830,9 @@ function openCompose(lead, { templateId, queue, queueKind } = {}) {
   compose.lead = lead;
   if (queue) { compose.queue = queue; compose.queueIndex = 0; compose.queueKind = queueKind; }
   const saved = state.saved.get(lead.id);
-  const tid = templateId || (saved && ['emailed', 'followup'].includes(saved.status) ? 'followup' : 'cold');
+  const tid = templateId || (saved && ['emailed', 'followup'].includes(saved.status) ? 'followup' : lead.jobTitle ? 'vacancy' : 'cold');
   $('#cmTemplate').value = tid;
+  if (lead.jobTitle) $('#cmPosition').value = lead.jobTitle;
   $('#cmTitle').textContent = `Письмо: ${lead.name}`;
   $('#cmTo').value = (lead.emails || []).join(', ');
   $('#cmCc').value = partnerCc(state.profile);
@@ -1084,6 +1091,7 @@ function renderTracker() {
           <span>${esc([l.city, l.state].filter(Boolean).join(', '))}</span>
           ${l.lastContactAt ? `<span>Последнее письмо: ${new Date(l.lastContactAt).toLocaleDateString('ru-RU')}</span>` : ''}
           ${emailCount(l) ? `<span>Писем: ${emailCount(l)}</span>` : ''}
+          ${safeUrl(l.jobUrl) ? `<a href="${esc(safeUrl(l.jobUrl))}" target="_blank" rel="noopener">💼 ${esc(l.jobTitle || 'Вакансия')} ↗</a>` : ''}
           ${l.gmail?.threadId ? `<a href="${esc(gmailThreadUrl(l.gmail.threadId, l.gmail.account))}" target="_blank" rel="noopener">Переписка в Gmail ↗</a>` : ''}
         </div>
         ${l.reply ? `<div class="reply-box ${l.replySeen ? '' : 'new'}">💬 <b>${l.replySeen ? 'Ответ' : 'Новый ответ!'}</b> от ${esc(l.reply.from)}${l.reply.date ? ` · ${new Date(l.reply.date).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : ''}<br>«${esc(l.reply.snippet)}»</div>` : ''}
@@ -1250,6 +1258,220 @@ function initSettings() {
     await detectServer();
     renderResults();
     toast(state.server.ok ? 'Сервер подключён' : 'Сервер не отвечает');
+  });
+}
+
+// ---------- vacancies ----------
+const jobs = { all: [], sources: [], cursors: {}, loading: false, at: null };
+const JOBS_KEEP = 600;
+const jobBoards = () => load(KEYS.jobBoards, []);
+
+function initJobs() {
+  $('#jobsState').innerHTML += STATES.map((s) => `<option value="${s.code}">${esc(s.name)}</option>`).join('');
+  $('#jobsPresets').innerHTML = JOB_PRESETS.map((p) => `<button type="button" class="chip" data-q="${esc(p.q)}">${esc(p.label)}</button>`).join('');
+  $('#jobsSource').innerHTML += Object.entries(JOB_SOURCE_LABEL).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('');
+  $('#jobsPresets').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-q]');
+    if (!b) return;
+    $('#jobsQuery').value = b.dataset.q;
+    searchJobsUi();
+  });
+  $('#jobsForm').addEventListener('submit', (e) => { e.preventDefault(); searchJobsUi(); });
+  $('#jobsState').addEventListener('change', () => { renderJobLinks(); renderJobs(); });
+  $('#jobsQuery').addEventListener('input', debounce(renderJobLinks, 300));
+  ['jobsFit', 'jobsSource', 'jobsSort', 'jobsJ1', 'jobsHousing'].forEach((id) => $(`#${id}`).addEventListener('change', renderJobs));
+  $('#jobsFilter').addEventListener('input', debounce(renderJobs, 150));
+  $('#jobsMore').addEventListener('click', () => searchJobsUi(true));
+
+  $('#jobsBoards').value = jobBoards().join('\n');
+  $('#jobsBoardsSave').addEventListener('click', () => {
+    const lines = $('#jobsBoards').value.split('\n').map((x) => x.trim()).filter(Boolean).slice(0, 40);
+    save(KEYS.jobBoards, lines);
+    $('#jobsBoardsNote').textContent = lines.length ? `Сохранено: ${lines.length}. Будут проверяться при следующем поиске.` : 'Список очищен.';
+    renderJobSources();
+  });
+
+  // Last results survive a reload, so opening the tab doesn't spend API quota again.
+  const last = load(KEYS.jobs, null);
+  if (last?.jobs?.length) {
+    jobs.all = last.jobs;
+    jobs.sources = last.sources || [];
+    jobs.at = last.at;
+    $('#jobsQuery').value = last.q || '';
+    $('#jobsState').value = last.state || '';
+  }
+  bindJobCards();
+  renderJobLinks();
+  renderJobSources();
+  renderJobs();
+}
+
+function setJobsStatus(html, kind = '') {
+  const el = $('#jobsStatus');
+  el.className = `status ${kind}`;
+  el.innerHTML = html;
+}
+
+function renderJobLinks() {
+  $('#jobsLinks').innerHTML = vacancySearchLinks($('#jobsQuery').value.trim(), $('#jobsState').value)
+    .map((l) => `<a class="link-chip" href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`).join('');
+}
+
+function renderJobSources() {
+  const el = $('#jobsSources');
+  if (!el) return;
+  if (!state.server.ok) {
+    el.innerHTML = '<p class="hint">⚪ Сервер не найден. Сбор вакансий работает на Vercel или при запуске <code>npm start</code>. Пока можно искать по ссылкам на площадки внизу страницы.</p>';
+    return;
+  }
+  const cfg = state.server.jobs || {};
+  const boards = jobBoards().length + (cfg.boards || 0);
+  const last = new Map(jobs.sources.map((s) => [s.id, s]));
+  const defs = [
+    { id: 'google', label: 'Google Jobs', env: 'SERPAPI_KEY', on: cfg.google },
+    { id: 'adzuna', label: 'Adzuna', env: 'ADZUNA_APP_ID и ADZUNA_APP_KEY', on: cfg.adzuna },
+    { id: 'jooble', label: 'Jooble', env: 'JOOBLE_API_KEY', on: cfg.jooble },
+    { id: 'boards', label: `Сайты работодателей (${boards})`, env: 'ссылки на карьерные страницы внизу', on: boards > 0 },
+  ];
+  el.innerHTML = defs.map((d) => {
+    const s = last.get(d.id);
+    if (!d.on && !s?.configured) return `<span class="src" title="Не подключено: ${esc(d.env)}">⚪ ${esc(d.label)}</span>`;
+    if (s && !s.ok) return `<span class="src bad" title="${esc(s.error || '')}">⚠️ ${esc(d.label)}: ошибка</span>`;
+    return `<span class="src on" title="${esc(s?.error || '')}">✓ ${esc(d.label)}${s && !s.skipped ? ` · ${s.count}` : ''}${s?.error ? ' ⚠️' : ''}</span>`;
+  }).join('') + (defs.some((d) => d.on) ? '' : `<p class="hint">Ни одна площадка пока не подключена. Добавь на Vercel бесплатные ключи (Settings → Environment Variables):
+    <code>SERPAPI_KEY</code> (Google Jobs: Indeed, LinkedIn, Glassdoor, ZipRecruiter…), <code>ADZUNA_APP_ID</code> + <code>ADZUNA_APP_KEY</code>, <code>JOOBLE_API_KEY</code>.
+    Инструкция в README. Карьерные страницы работодателей работают без ключей.</p>`);
+}
+
+async function searchJobsUi(more = false) {
+  if (jobs.loading) return;
+  if (!state.server.ok) {
+    setJobsStatus('Для сбора вакансий нужен сервер (Vercel или <code>npm start</code>). Пока воспользуйся ссылками на площадки внизу.', 'warn');
+    return;
+  }
+  const q = $('#jobsQuery').value.trim() || JOB_PRESETS[0].q;
+  const st = $('#jobsState').value;
+  jobs.loading = true;
+  $('#jobsBtn').disabled = true;
+  $('#jobsMore').disabled = true;
+  setJobsStatus(`<span class="spinner"></span> Собираю вакансии${st ? ` в штате ${esc(STATE_BY_CODE[st].name)}` : ' по всей Америке'} со всех площадок… Это может занять до минуты.`);
+  try {
+    const res = await fetch(`${state.server.base}api/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ q, where: STATE_BY_CODE[st]?.name || '', cursors: more ? jobs.cursors : {}, boards: jobBoards(), more }),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+    const fresh = (j.jobs || []).map(analyzeJob);
+    jobs.all = dedupeJobs(more ? [...jobs.all, ...fresh] : fresh).slice(0, JOBS_KEEP);
+    jobs.sources = more
+      ? jobs.sources.map((s) => {
+        const n = (j.sources || []).find((x) => x.id === s.id);
+        return n && !n.skipped ? { ...n, count: (s.count || 0) + n.count } : s;
+      })
+      : (j.sources || []);
+    jobs.cursors = Object.fromEntries((j.sources || []).filter((s) => s.next).map((s) => [s.id, s.next]));
+    jobs.at = new Date().toISOString();
+    // Kept small: localStorage (~5 MB) is shared with the resume PDFs.
+    const slim = jobs.all.slice(0, 300).map((x) => ({ ...x, description: (x.description || '').slice(0, 300) }));
+    save(KEYS.jobs, { q, state: st, at: jobs.at, jobs: slim, sources: jobs.sources });
+    const active = (j.sources || []).filter((s) => s.configured);
+    if (!active.length) {
+      setJobsStatus('Ни одна площадка не подключена: добавь ключи на Vercel или карьерные страницы работодателей (подробности выше).', 'warn');
+    } else if (!fresh.length) {
+      const errs = active.filter((s) => s.error).map((s) => `${s.id}: ${s.error}`);
+      setJobsStatus(more ? 'Больше вакансий нет.' : `Ничего не нашлось. Попробуй другой запрос или всю Америку.${errs.length ? ` Ошибки: ${esc(errs.join('; '))}` : ''}`, 'warn');
+    } else {
+      setJobsStatus('');
+    }
+  } catch (e) {
+    setJobsStatus(`Не удалось получить вакансии: ${esc(e.message)}`, 'error');
+  } finally {
+    jobs.loading = false;
+    $('#jobsBtn').disabled = false;
+    $('#jobsMore').disabled = false;
+    renderJobSources();
+    renderJobs();
+  }
+}
+
+function visibleJobs() {
+  return sortJobs(filterJobs(jobs.all, {
+    text: $('#jobsFilter').value,
+    state: $('#jobsState').value,
+    fit: $('#jobsFit').value,
+    source: $('#jobsSource').value,
+    j1Only: $('#jobsJ1').checked,
+    housingOnly: $('#jobsHousing').checked,
+  }), $('#jobsSort').value);
+}
+
+function renderJobs() {
+  const all = jobs.all;
+  const list = visibleJobs();
+  $('#jobsBar').hidden = !all.length;
+  $('#jobsMoreRow').hidden = !Object.keys(jobs.cursors).length;
+  if (!all.length) { $('#jobsList').innerHTML = ''; return; }
+  const when = jobs.at ? ` · обновлено ${new Date(jobs.at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : '';
+  $('#jobsSummary').innerHTML = `Вакансий <b>${all.length}</b> · J-1 упомянут <b>${all.filter((x) => x.j1).length}</b> · с жильём <b>${all.filter((x) => x.housing).length}</b>${list.length !== all.length ? ` · показано ${list.length}` : ''}<span class="muted">${when}</span>`;
+  $('#jobsList').innerHTML = list.map(jobCard).join('') || '<div class="empty">Под фильтр ничего не попало.</div>';
+}
+
+function jobCard(j) {
+  const lead = jobToLead(j);
+  const saved = state.saved.get(lead.id);
+  const status = saved ? STATUS_BY_ID[saved.status] : null;
+  const cat = CATEGORY_BY_ID[j.category];
+  const posted = j.postedAt ? new Date(j.postedAt).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+  const sources = (j.sources || [j.source]).map((s) => JOB_SOURCE_LABEL[s] || s).join(', ');
+  const apply = safeUrl(j.url);
+  const more = (j.applyOptions || []).filter((o) => safeUrl(o.url) && o.url !== j.url).slice(0, 3);
+  return `
+  <article class="lead job fit-${j.fit?.level || 'ok'}" data-id="${esc(j.id)}">
+    <div class="lead-main">
+      <div class="lead-top">
+        <h4>${cat?.icon || '💼'} ${esc(j.title)}</h4>
+        ${j.j1 ? '<span class="badge st-green" title="В описании упомянуты J-1, Work and Travel или international students">🌎 J-1</span>' : ''}
+        ${j.housing ? '<span class="badge st-green" title="В описании упомянуто жильё">🏠 жильё</span>' : ''}
+        ${j.seasonal ? '<span class="badge st-blue">☀️ сезонная</span>' : ''}
+        <span class="badge fit-${j.fit?.level}" title="${esc((j.fit?.notes || []).join(' '))}">${FIT_LABEL[j.fit?.level] || ''}</span>
+        ${status ? `<span class="badge st-${status.color}">${esc(status.label)}</span>` : ''}
+      </div>
+      <div class="lead-meta">
+        <span>🏢 <b>${esc(j.company || '—')}</b></span>
+        ${j.location ? `<span>📍 ${esc(j.location)}</span>` : ''}
+        ${posted ? `<span>🗓 ${esc(posted)}</span>` : ''}
+        ${j.salary ? `<span>💵 ${esc(j.salary)}</span>` : ''}
+        ${j.type ? `<span>${esc(j.type)}</span>` : ''}
+        <span>Источник: ${esc(sources)}${j.via ? ` · ${esc(j.via)}` : ''}</span>
+      </div>
+      ${j.fit?.notes?.length ? `<div class="lead-note">${esc(j.fit.notes.join(' '))}</div>` : ''}
+      ${j.description ? `<p class="job-desc" data-act="desc" title="Нажми, чтобы развернуть">${esc(j.description)}</p>` : ''}
+      <div class="lead-actions">
+        ${apply ? `<a class="btn sm primary" href="${esc(apply)}" target="_blank" rel="noopener">Откликнуться ↗</a>` : ''}
+        ${more.map((o) => `<a class="btn sm ghost" href="${esc(safeUrl(o.url))}" target="_blank" rel="noopener">${esc(o.title || hostOf(o.url))} ↗</a>`).join('')}
+        <a class="btn sm" href="${esc(googleMapsUrl(lead))}" target="_blank" rel="noopener">🗺️ Google Maps</a>
+        <a class="btn sm" href="${esc(emailSearchUrl(lead))}" target="_blank" rel="noopener">📧 Найти email</a>
+        <button class="btn sm" data-act="compose">✉️ Письмо</button>
+        ${saved ? '<button class="btn sm ghost" data-act="tracker">📋 В трекере</button>' : '<button class="btn sm" data-act="save">➕ В мои контакты</button>'}
+      </div>
+    </div>
+  </article>`;
+}
+
+function bindJobCards() {
+  $('#jobsList').addEventListener('click', (e) => {
+    const el = e.target.closest('[data-act]');
+    if (!el) return;
+    const j = jobs.all.find((x) => x.id === el.closest('[data-id]')?.dataset.id);
+    if (!j) return;
+    const lead = jobToLead(j);
+    const act = el.dataset.act;
+    if (act === 'desc') el.classList.toggle('open');
+    if (act === 'save') { saveLead(lead); renderJobs(); toast('Сохранено в «Мои контакты». Добавь email работодателя в трекере, чтобы написать.'); }
+    if (act === 'tracker') showTab('tracker');
+    if (act === 'compose') openCompose(state.saved.get(lead.id) || lead, { templateId: 'vacancy' });
   });
 }
 
@@ -1682,6 +1904,7 @@ function boot() {
   initProfile();
   initSettings();
   initHotspots();
+  initJobs();
   initGmail();
   initAttachments();
   initTabs();

@@ -20,13 +20,18 @@ and hand them to the user; do not put them in the repo.
     Gmail compose / Google Maps / job-board / housing links
   - `js/gmail.js` — Gmail API in the browser (GIS token model, `gmail.send` + `gmail.readonly`), MIME with attachments,
     From header, thread analysis (replies/bounces), inbox bounce scan, friendly Google errors
+  - `js/jobs.js` — Vacancies tab helpers: job location → state, J-1 / housing / seasonal signals, W&T title checks
+    (`analyzeJob`), cross-platform dedupe, filters/sort, `jobToLead`, `safeUrl`, links to platforms without an API
   - `js/store.js` — localStorage keys, saved-lead shape, `mergeLeads` (backup import), `applyBounce`, CSV
   - `js/app.js` — all UI: search, map (Leaflet, fullscreen, popups), city picker, results, tracker, profile,
     attachments, campaign runner (jittered pause, daily cap), reply checking
   - `vendor/leaflet/` — vendored Leaflet 1.9.4
 - `server/handlers.js` — API shared by local server and Vercel: `/api/health` (also exposes
   `GOOGLE_OAUTH_CLIENT_ID`), `/api/emails` (website email discovery), `/api/overpass` (cached proxy, stays under
-  Vercel's 60 s), `/api/places` (Google Places API (New), `GOOGLE_MAPS_API_KEY`, `GOOGLE_MAX_PAGES`)
+  Vercel's 60 s), `/api/places` (Google Places API (New), `GOOGLE_MAPS_API_KEY`, `GOOGLE_MAX_PAGES`), `/api/jobs` (POST JSON, see jobs.js)
+- `server/jobs.js` — `/api/jobs` aggregator: Google Jobs via SerpApi (`SERPAPI_KEY`), Adzuna (`ADZUNA_APP_ID`,
+  `ADZUNA_APP_KEY`), Jooble (`JOOBLE_API_KEY`), employer boards on Greenhouse/Lever/SmartRecruiters/Ashby/Workday
+  (`JOB_BOARDS` + links from the browser; fixed API hosts, no arbitrary fetches), 3 h cache, 45 s deadline
 - `server/emails.js` — crawler with SSRF protection (checks every redirect hop), Cloudflare email decoding, ranking
 - `server/index.js` — local Node server (static + routes), no dependencies
 - `api/*.js` — thin Vercel function wrappers; `vercel.json` serves `public/` and sets `maxDuration: 60`
@@ -44,5 +49,6 @@ mocked e2e test, not live calls. Run both test suites before every push.
 - Match existing style: small pure functions in `search.js` / `outreach.js` / `gmail.js` / `store.js` with unit
   tests; DOM code only in `app.js`; escape all OSM/website text with `esc()` before inserting HTML
 - Leaflet sets an inline `position: relative` on the map — fullscreen CSS needs `!important`
+- Job URLs come from third-party APIs: pass them through `safeUrl()` before putting them in `href`
 - Saved-lead fields must be listed in `LEAD_FIELDS` (store.js) or they are dropped on save
 - Campaign must refuse to start while placeholders like `[University]` remain in the email

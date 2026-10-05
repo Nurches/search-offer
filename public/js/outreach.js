@@ -228,7 +228,7 @@ export function buildVars(profile, lead = {}, extra = {}) {
     business: lead.name || 'your company',
     city,
     positions: cat?.positions || 'housekeeping, food service or guest services',
-    positionTitle: extra.positionTitle || cat?.positions?.split(',')[0]?.trim() || 'seasonal',
+    positionTitle: extra.positionTitle || lead.jobTitle || cat?.positions?.split(',')[0]?.trim() || 'seasonal',
     resumeLine: resumeLine(p, extra.attachments || 0, false),
     housingLine: p.housingNeed === 'yes'
       ? 'Housing is very important for me: do you provide employee housing, or could you help me find affordable housing close to work?'

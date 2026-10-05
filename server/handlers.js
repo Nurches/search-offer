@@ -3,6 +3,7 @@
 import crypto from 'node:crypto';
 import { findEmailsOnSite } from './emails.js';
 import { searchPlaces } from './places.js';
+import { jobsConfig, searchJobs } from './jobs.js';
 
 const OVERPASS = [
   'https://overpass-api.de/api/interpreter',
@@ -60,6 +61,13 @@ async function readBody(req, limit = 32 * 1024) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+async function readJson(req) {
+  // Vercel already parses JSON bodies into req.body.
+  if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) return req.body;
+  const raw = await readBody(req);
+  try { return raw ? JSON.parse(raw) : {}; } catch { throw Object.assign(new Error('Bad JSON'), { status: 400 }); }
+}
+
 function wrap(fn) {
   return async (req, res) => {
     try {
@@ -74,7 +82,7 @@ function wrap(fn) {
 }
 
 export const health = wrap(async (req, res) => send(res, 200, {
-  app: 'wt-job-finder', emails: true, places: Boolean(googleKey()),
+  app: 'wt-job-finder', emails: true, places: Boolean(googleKey()), jobs: jobsConfig(),
   // OAuth client IDs are public by design (they ship to the browser).
   oauthClientId: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
 }, { 'Cache-Control': 'no-store' }));
@@ -142,9 +150,24 @@ export const places = wrap(async (req, res) => {
   return send(res, 200, { places: list });
 });
 
+export const jobs = wrap(async (req, res) => {
+  if (req.method !== 'POST') return send(res, 405, { error: 'POST only' });
+  if (rateLimited(clientIp(req), 'jobs', 20)) return send(res, 429, { error: 'Слишком часто, подожди минуту' });
+  const body = await readJson(req);
+  const result = await searchJobs({
+    q: body.q,
+    where: body.where,
+    cursors: body.cursors && typeof body.cursors === 'object' ? body.cursors : {},
+    boards: Array.isArray(body.boards) ? body.boards.map(String).slice(0, 40) : [],
+    more: Boolean(body.more),
+  });
+  return send(res, 200, result, { 'Cache-Control': 'no-store' });
+});
+
 export const routes = {
   '/api/health': health,
   '/api/emails': emails,
   '/api/overpass': overpass,
   '/api/places': places,
+  '/api/jobs': jobs,
 };

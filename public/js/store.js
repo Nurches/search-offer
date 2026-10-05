@@ -25,10 +25,12 @@ export const KEYS = {
   sendLog: 'wt.sendLog.v1',
   attachments: 'wt.attachments.v1',
   bouncesSeen: 'wt.bouncesSeen.v1',
+  jobs: 'wt.jobs.v1',
+  jobBoards: 'wt.jobBoards.v1',
 };
 
 const LEAD_FIELDS = ['id', 'source', 'name', 'category', 'address', 'city', 'state', 'lat', 'lon', 'phone',
-  'website', 'emails', 'facebook', 'placeId', 'gmapsUrl', 'rating', 'ratingCount', 'fit', 'gmail', 'reply', 'replySeen', 'housing', 'housingCost', 'housingMentioned', 'badEmails'];
+  'website', 'emails', 'facebook', 'placeId', 'gmapsUrl', 'rating', 'ratingCount', 'fit', 'gmail', 'reply', 'replySeen', 'housing', 'housingCost', 'housingMentioned', 'badEmails', 'jobTitle', 'jobUrl'];
 
 export function toSavedLead(lead) {
   const out = {};
