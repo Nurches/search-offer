@@ -34,6 +34,12 @@ and hand them to the user; do not put them in the repo.
   (`JOB_BOARDS` + links from the browser; fixed API hosts, no arbitrary fetches), 3 h cache, 45 s deadline
 - `server/emails.js` — crawler with SSRF protection (checks every redirect hop), Cloudflare email decoding, ranking
 - `server/index.js` — local Node server (static + routes), no dependencies
+- `tools/interexchange-collector.js` — standalone script pasted into the browser console on the participant's
+  InterExchange "Job Listings" page: walks all pages (fetch + DOMParser, or clicks for a JS-rendered list), parses
+  wage/hours/housing/dates/location from card text, shows a panel and builds a self-contained HTML report with filters
+  + CSV. Pure parsers are exposed as `globalThis.__IX` when loaded without a DOM (unit tests); browser test against a
+  fake listings site is `test/e2e-interexchange.mjs`. The real site needs a login — nothing about its markup is known
+  for sure, so card/pagination detection is heuristic
 - `api/*.js` — thin Vercel function wrappers; `vercel.json` serves `public/` and sets `maxDuration: 60`
 
 ## Commands
