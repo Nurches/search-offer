@@ -7,9 +7,10 @@
  *   2. Откройте консоль браузера: Cmd+Option+J (Mac) / Ctrl+Shift+J (Windows), вкладка Console.
  *      Chrome может попросить сначала ввести `allow pasting` — введите и нажмите Enter.
  *   3. Вставьте весь этот файл и нажмите Enter.
- *   4. Внизу слева появится панель с прогрессом. Когда сбор закончится — «Открыть отчёт»:
- *      там фильтры (жильё, ставка, часы, штат, даты, должность), сортировка по ≈$ в неделю, ★ избранное,
- *      экспорт в CSV.
+ *   4. Внизу слева появится панель с прогрессом (~1 мин на 51 страницу). Потом:
+ *      «Догрузить профили» — даты начала, аренда, залог, соседи (по одному запросу на работодателя, несколько минут);
+ *      «Открыть отчёт» — фильтры (жильё, ставка, часы, аренда, штат, регион, даты приезда/отъезда, 21+, интервью),
+ *      сортировка по ≈$ в неделю (и после аренды), ★ избранное, экспорт в CSV.
  *
  * Скрипт только читает страницы, которые вам и так видны (те же запросы, что при листании вручную),
  * с паузой между страницами. Ничего не отправляет и никуда не сохраняет, кроме файлов, которые вы скачаете сами.
@@ -19,9 +20,9 @@
 
   const CONFIG = {
     pauseMs: 700, // пауза между страницами списка
-    deep: false, // true — дополнительно открыть страницу каждой вакансии (дольше, но больше данных)
+    deep: false, // true — сразу догрузить профили работодателей (иначе — кнопкой на панели)
     deepConcurrency: 3,
-    deepPauseMs: 400,
+    deepPauseMs: 500,
     maxPages: 300,
   };
 
@@ -233,24 +234,146 @@
     };
   }
 
+  // ───────────────────────── InterExchange card / host profile (pure) ─────────────────────────
+
+  const clean = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  const money = (s) => {
+    const m = String(s == null ? '' : s).match(/\$\s*([\d,]+(?:\.\d+)?)/);
+    return m ? +m[1].replace(/,/g, '') : null;
+  };
+  const titleCase = (s) => (s && s === s.toUpperCase() ? s.toLowerCase().replace(/(^|[\s.'-])([a-z])/g, (m, a, b) => a + b.toUpperCase()) : s);
+  const weeklyRent = (line) => {
+    const v = money(line);
+    return v != null && /month/i.test(line) ? Math.round(v / 4.33) : v;
+  };
+
+  /**
+   * One InterExchange listing card → record. `raw` is what readIxCard() takes from the DOM:
+   * { id, position, profileUrl, fields: {h5 label: text}, badges, leftLines, rightLines, bodyLines, interviewOn, section }.
+   */
+  function normalizeIx(raw) {
+    const f = raw.fields || {};
+    const badges = (raw.badges || []).map((b) => clean(b).toLowerCase());
+    const loc = toLines(f.Location || '');
+    const cs = (loc[0] || '').match(/^(.*?),\s*([A-Za-z]{2})$/);
+    const R = raw.rightLines || [];
+    const otIdx = R.findIndex((l) => /^overtime wage/i.test(l));
+    const beforeOt = otIdx >= 0 ? R.slice(0, otIdx) : R;
+    const wageLine = beforeOt.find((l) => /^\$\s*[\d.,]+/.test(l) && !/rent/i.test(l)) || '';
+    const wage = money(wageLine);
+    const hoursLine = R.find((l) => /\d\s*hours?\b/i.test(l) && !l.includes('$'));
+    const hours = hoursLine ? +hoursLine.match(/([\d.]+)\s*hours?/i)[1] : null;
+    const rentLine = R.find((l) => /rent/i.test(l) && l.includes('$'));
+    const rent = rentLine ? weeklyRent(rentLine) : null;
+    const otLine = otIdx >= 0 ? R.slice(otIdx + 1).find((l) => /^\$/.test(l)) : null;
+    const fin = findDates(f['Preferred Finish Dates'] || '');
+    const body = raw.bodyLines || [];
+    const d = body.findIndex((l) => /^position description$/i.test(l));
+    const description = d >= 0 ? body.slice(d).join('\n') : '';
+    const op = (raw.leftLines || []).join(' ').match(/(\d+)\s+positions?\b/i);
+    const weekly = wage != null && hours != null ? Math.round(wage * hours) : null;
+    return {
+      key: raw.id,
+      url: raw.profileUrl || '',
+      employer: clean(f['Host Employer']),
+      position: clean(raw.position),
+      business: clean(f['Type of Business']),
+      city: cs ? titleCase(cs[1].trim()) : (loc[0] || ''),
+      state: cs ? cs[2].toUpperCase() : '',
+      region: loc[1] || '',
+      wage,
+      wageMax: null,
+      overtimeWage: otLine ? money(otLine) : null,
+      tipped: badges.includes('tipped') || /\+\s*tips/i.test(wageLine),
+      tipsSometimes: R.some((l) => /tips are sometimes/i.test(l)),
+      hours,
+      hoursMax: null,
+      weekly,
+      rent,
+      net: weekly != null && rent != null ? weekly - rent : null,
+      housing: badges.includes('housing provided') ? 'provided' : badges.includes('housing assistance') ? 'assistance' : 'none',
+      overtime: badges.includes('overtime') ? 'yes' : badges.includes('maybe overtime') ? 'maybe' : '',
+      startFrom: '',
+      startTo: '',
+      finishFrom: fin[0] || '',
+      finishTo: fin[1] || fin[0] || '',
+      openings: op ? +op[1] : null,
+      interviews: /interview/i.test(raw.section || '') || Boolean(raw.interviewOn),
+      interviewOn: clean(raw.interviewOn),
+      lastVisited: findDates(f['Last Visited'] || '')[0] || '',
+      age21: /must be (at least )?21\b|\b21 years (of age|old)|\b21\+/i.test(description),
+      photos: Boolean(raw.hasPhotos),
+      video: Boolean(raw.hasVideo),
+      profile: false,
+      text: description.slice(0, 1500),
+    };
+  }
+
+  /** Host profile page fields ({h5 label: text}) → dates window, rent, roommates, transport… */
+  function normalizeProfile({ fields: f = {}, address = '' } = {}) {
+    const st = findDates(f.Start || '');
+    const fi = findDates(f.Finish || '');
+    const int = (s) => { const m = String(s || '').match(/\d+/); return m ? +m[0] : null; };
+    return {
+      startFrom: st[0] || '',
+      startTo: st[1] || st[0] || '',
+      finishFrom: fi[0] || '',
+      finishTo: fi[1] || fi[0] || '',
+      housingType: clean(f['Housing Type']),
+      rent: f.Rent ? weeklyRent(f.Rent) : null,
+      deposit: money(f['Housing Deposit']),
+      rentDeducted: clean(f['Rent deducted from wages']),
+      shareHousing: int(f['Number of people sharing housing']),
+      shareBedroom: int(f['Number of people sharing a bedroom']),
+      transportCost: money(f['Estimated Transportation Cost']),
+      distance: clean(f['Distance from work']).slice(0, 120),
+      meals: clean(f['Meals Included']).slice(0, 160),
+      drugTest: clean(f['Drug Testing Requirements']).slice(0, 80),
+      bonuses: clean(f['Bonuses Available']).slice(0, 160),
+      address: clean(address),
+    };
+  }
+
+  /** Adds profile data to a listing. The card's own rent / finish dates win when present. */
+  function mergeProfile(r, p) {
+    for (const [k, v] of Object.entries(p)) {
+      if (v == null || v === '') continue;
+      if ((k === 'rent' || k === 'finishFrom' || k === 'finishTo') && r[k] != null && r[k] !== '') continue;
+      r[k] = v;
+    }
+    r.net = r.weekly != null && r.rent != null ? r.weekly - r.rent : null;
+    r.profile = true;
+    return r;
+  }
+
   const csvCell = (v) => {
     const s = v == null ? '' : String(v);
     return /[",;\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const HOUSING_RU = { provided: 'предоставляется', assistance: 'помощь с поиском', none: 'нет', '': '' };
   const CSV_COLUMNS = [
-    ['employer', 'Работодатель'], ['position', 'Должность'], ['city', 'Город'], ['state', 'Штат'], ['wage', 'Ставка $/ч'],
-    ['hours', 'Часов в неделю'], ['weekly', '≈$ в неделю'], ['housing', 'Жильё'], ['housingCost', 'Стоимость жилья'],
-    ['tipped', 'Чаевые'], ['start', 'Начало'], ['end', 'Конец'], ['interviews', 'Интервью'], ['openings', 'Мест'],
-    ['url', 'Ссылка'],
+    ['employer', 'Работодатель'], ['position', 'Должность'], ['business', 'Тип бизнеса'], ['city', 'Город'], ['state', 'Штат'],
+    ['region', 'Регион'], ['wage', 'Ставка $/ч'], ['tipped', 'Чаевые'], ['hours', 'Часов/нед'], ['weekly', '≈$/нед'],
+    ['rent', 'Аренда $/нед'], ['net', '≈$/нед после аренды'], ['housing', 'Жильё'], ['startFrom', 'Начало с'],
+    ['startTo', 'Начало по'], ['finishFrom', 'Конец с'], ['finishTo', 'Конец по'], ['openings', 'Мест'],
+    ['interviewOn', 'Интервью'], ['age21', 'Только 21+'], ['overtime', 'Сверхурочные'], ['shareBedroom', 'Человек в комнате'],
+    ['deposit', 'Залог $'], ['transportCost', 'Транспорт $/нед'], ['lastVisited', 'Работодатель заходил'], ['url', 'Ссылка'],
   ];
+  const csvValue = (r, k) => {
+    if (k === 'housing') return HOUSING_RU[r.housing || ''];
+    if (k === 'tipped' || k === 'age21') return r[k] == null ? '' : r[k] ? 'да' : 'нет';
+    if (k === 'overtime') return { yes: 'да', maybe: 'возможно' }[r.overtime] || '';
+    return r[k];
+  };
   function toCsv(rows) {
-    const val = (r, k) => (k === 'housing' ? HOUSING_RU[r.housing || ''] : k === 'tipped' ? (r.tipped == null ? '' : r.tipped ? 'да' : 'нет') : r[k]);
-    return `﻿${[CSV_COLUMNS.map((c) => c[1]), ...rows.map((r) => CSV_COLUMNS.map(([k]) => val(r, k)))]
+    return `﻿${[CSV_COLUMNS.map((c) => c[1]), ...rows.map((r) => CSV_COLUMNS.map(([k]) => csvValue(r, k)))]
       .map((r) => r.map(csvCell).join(';')).join('\r\n')}`;
   }
 
-  const IX = { toLines, labelValue, findDates, parseWage, parseHours, parseHousing, parseLocation, parseDates, parseListing, toCsv };
+  const IX = {
+    toLines, labelValue, findDates, parseWage, parseHours, parseHousing, parseLocation, parseDates, parseListing,
+    normalizeIx, normalizeProfile, mergeProfile, toCsv,
+  };
 
   // Loaded by unit tests (no browser DOM) → expose helpers and stop here.
   if (typeof document === 'undefined' || typeof window === 'undefined') { globalThis.__IX = IX; return; }
@@ -275,8 +398,53 @@
     return toLines(parts.join('')).join('\n');
   }
 
+  /** <h5>Label</h5> value pairs inside `root`. */
+  function h5Fields(root) {
+    const out = {};
+    for (const h of root.querySelectorAll('h5')) {
+      const label = clean(h.textContent);
+      if (!label || label in out || !h.parentElement) continue;
+      const lines = toLines(blockText(h.parentElement));
+      const i = lines.indexOf(label);
+      out[label] = (i >= 0 ? lines.slice(i + 1) : lines).join('\n');
+    }
+    return out;
+  }
+
+  function readIxCard(card, base) {
+    const head = card.querySelector('.card-header a[href]');
+    const body = card.querySelector('.card-body') || card;
+    const cols = [...body.querySelectorAll('.col-6')];
+    const right = cols.find((c) => c.classList.contains('text-right')) || cols[1];
+    const footer = card.querySelector('.card-footer');
+    const foot = footer ? toLines(blockText(footer)) : [];
+    const iv = foot.findIndex((l) => /^interviewing on$/i.test(l));
+    const section = card.closest('section');
+    const strong = card.querySelector('.card-header strong');
+    return {
+      id: card.id.replace(/^job_listing_/, '') || (head && head.getAttribute('href')) || '',
+      position: strong ? strong.textContent : head ? head.textContent : '',
+      profileUrl: head ? new URL(head.getAttribute('href'), base).href : '',
+      fields: h5Fields(card),
+      badges: [...card.querySelectorAll('.badge')].map((b) => b.textContent),
+      leftLines: cols[0] ? toLines(blockText(cols[0])) : [],
+      rightLines: right ? toLines(blockText(right)) : [],
+      bodyLines: toLines(blockText(body)),
+      interviewOn: iv >= 0 ? foot[iv + 1] || '' : '',
+      section: section && section.querySelector('h3') ? section.querySelector('h3').textContent : '',
+      hasPhotos: Boolean(card.querySelector('.card-header .fa-camera')),
+      hasVideo: Boolean(card.querySelector('.card-header .fa-video')),
+    };
+  }
+
+  function readProfile(doc) {
+    const main = doc.querySelector('#primary-content') || doc.body;
+    const addr = main.querySelector('.card-text a[href*="maps"]');
+    return { fields: h5Fields(main), address: addr ? addr.textContent : '' };
+  }
+
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const abs = (href, base) => { try { return new URL(href, base); } catch { return null; } };
+  const abs = (href, base) => { try { return href ? new URL(href, base) : null; } catch { return null; } };
   const ID_SEG = /^(\d+|[0-9a-f]{8}-[0-9a-f-]{27,}|[0-9a-f]{16,}|[A-Za-z0-9_-]*\d[A-Za-z0-9_-]{5,})$/i;
   const template = (u) => u.pathname.split('/').map((s) => (ID_SEG.test(s) ? ':id' : s)).join('/');
 
@@ -337,7 +505,7 @@
     let el = a;
     while (el.parentElement && el.parentElement.tagName !== 'BODY') {
       const p = el.parentElement;
-      if ([...otherAnchors].some((o) => p.contains(o))) break;
+      if (otherAnchors.some((o) => p.contains(o))) break;
       el = p;
     }
     return el;
@@ -366,26 +534,39 @@
   }
 
   let LISTING_TEMPLATE = null;
+  const known = { positions: harvestFilter(document, 'Position') };
 
-  /** All listings in a document → [{ key, url, employer, text }]. */
-  function extractCards(doc, base) {
+  /** Generic fallback for pages that are not InterExchange cards. */
+  function genericRecords(doc, base) {
     const { template: t, links } = listingLinks(doc, base, LISTING_TEMPLATE);
+    let cards;
     if (links.length) {
       LISTING_TEMPLATE = LISTING_TEMPLATE || t;
       const allAnchors = links.flatMap((l) => l.anchors);
-      return links.map((l) => {
-        const others = allAnchors.filter((x) => !l.anchors.includes(x));
-        const card = cardOf(l.anchors[0], others);
+      cards = links.map((l) => {
+        const card = cardOf(l.anchors[0], allAnchors.filter((x) => !l.anchors.includes(x)));
         const textLink = l.anchors.find((x) => x.textContent.trim()) || l.anchors[0];
         return { key: new URL(l.url).pathname, url: l.url, employer: employerOf(card, textLink), text: blockText(card) };
       });
+    } else {
+      cards = repeatedBlocks(doc).map((card, i) => {
+        const text = blockText(card);
+        const a = card.querySelector('a[href]');
+        const u = a ? abs(a.getAttribute('href'), base) : null;
+        return { key: card.getAttribute('data-id') || (u && u.href) || `${i}:${text.slice(0, 80)}`, url: u ? u.href : '', employer: employerOf(card, a), text };
+      });
     }
-    return repeatedBlocks(doc).map((card, i) => {
-      const text = blockText(card);
-      const a = card.querySelector('a[href]');
-      const url = a ? (abs(a.getAttribute('href'), base) || {}).href || '' : '';
-      return { key: card.getAttribute('data-id') || url || `${i}:${text.slice(0, 80)}`, url, employer: employerOf(card, a), text };
+    return cards.map((c) => {
+      const p = parseListing(c.text, known);
+      return { ...c, ...p, startFrom: p.start, finishTo: p.end, rent: null, net: null, region: '', business: '', text: c.text.slice(0, 1500) };
     });
+  }
+
+  /** All listings in a document → records. */
+  function extractRecords(doc, base) {
+    const cards = doc.querySelectorAll('.card.job_listing, div[id^="job_listing_"].job_listing');
+    if (cards.length) return [...cards].map((c) => normalizeIx(readIxCard(c, base)));
+    return genericRecords(doc, base);
   }
 
   /** Pagination: URL builder for page N and the last page number, from the links on the page. */
@@ -398,8 +579,9 @@
     for (const a of nums) {
       if (a.tagName !== 'A') continue;
       const n = a.textContent.trim();
-      const u = abs(a.getAttribute('href'), base);
-      if (!u || u.href.startsWith('javascript') || a.getAttribute('href') === '#') continue;
+      const href = a.getAttribute('href');
+      const u = abs(href, base);
+      if (!u || href === '#' || /^javascript:/i.test(href)) continue;
       for (const [k, v] of u.searchParams) {
         if (v === n) return { last, url: (p) => { const x = new URL(u); x.searchParams.set(k, String(p)); return x.href; } };
       }
@@ -419,7 +601,7 @@
   document.getElementById('ix-collector')?.remove();
   const panel = document.createElement('div');
   panel.id = 'ix-collector';
-  panel.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:2147483647;width:340px;max-width:calc(100vw - 32px);'
+  panel.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:2147483647;width:360px;max-width:calc(100vw - 32px);'
     + 'background:#fff;color:#1b1f24;border:1px solid #c9d1d9;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.2);'
     + 'font:14px/1.4 system-ui,-apple-system,Segoe UI,sans-serif;padding:14px';
   panel.innerHTML = '<div style="font-weight:600;margin-bottom:6px">Сбор офферов InterExchange</div>'
@@ -431,14 +613,16 @@
   const $bar = panel.querySelector('[data-bar]');
   const $b = panel.querySelector('[data-b]');
   const status = (t, frac) => { $s.textContent = t; if (frac != null) $bar.style.width = `${Math.min(100, Math.round(frac * 100))}%`; };
-  const button = (label, fn, primary) => {
-    const b = document.createElement('button');
-    b.textContent = label;
-    b.style.cssText = `padding:6px 10px;border-radius:6px;cursor:pointer;font:inherit;border:1px solid ${primary ? '#1f6feb' : '#c9d1d9'};`
-      + `background:${primary ? '#1f6feb' : '#f6f8fa'};color:${primary ? '#fff' : '#1b1f24'}`;
-    b.onclick = fn;
-    $b.appendChild(b);
-    return b;
+  const buttons = (list) => {
+    $b.innerHTML = '';
+    for (const [label, fn, primary] of list) {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.style.cssText = `padding:6px 10px;border-radius:6px;cursor:pointer;font:inherit;border:1px solid ${primary ? '#1f6feb' : '#c9d1d9'};`
+        + `background:${primary ? '#1f6feb' : '#f6f8fa'};color:${primary ? '#fff' : '#1b1f24'}`;
+      b.onclick = fn;
+      $b.appendChild(b);
+    }
   };
   const download = (name, content, type) => {
     const a = document.createElement('a');
@@ -450,17 +634,20 @@
   };
 
   let stopped = false;
-  const stopBtn = button('Стоп', () => { stopped = true; stopBtn.disabled = true; status('Останавливаю… соберу отчёт из того, что уже есть.'); });
+  const stoppable = () => {
+    stopped = false;
+    buttons([['Стоп', () => { stopped = true; status('Останавливаю… отчёт будет из того, что уже есть.'); }]]);
+  };
 
   // ───────────────────────── collect ─────────────────────────
 
-  const known = { positions: harvestFilter(document, 'Position') };
   const results = new Map();
-  const add = (cards) => {
+  const add = (records) => {
     let fresh = 0;
-    for (const c of cards) {
-      if (results.has(c.key)) continue;
-      results.set(c.key, { ...c, ...parseListing(c.text, known) });
+    for (const r of records) {
+      const old = results.get(r.key);
+      if (old) { if (r.interviews) { old.interviews = true; old.interviewOn = old.interviewOn || r.interviewOn; } continue; }
+      results.set(r.key, r);
       fresh += 1;
     }
     return fresh;
@@ -474,10 +661,11 @@
 
   async function viaFetch(pg) {
     const total = totalCount();
+    const lastPage = Math.min(pg.last > 1 ? pg.last : CONFIG.maxPages, CONFIG.maxPages);
     let emptyStreak = 0;
-    for (let p = 1; p <= Math.min(pg.last > 1 ? pg.last : CONFIG.maxPages, CONFIG.maxPages) && !stopped; p += 1) {
-      const doc = await fetchDoc(pg.url(p));
-      const fresh = add(extractCards(doc, pg.url(p)));
+    for (let p = 1; p <= lastPage && !stopped; p += 1) {
+      const url = pg.url(p);
+      const fresh = add(extractRecords(await fetchDoc(url), url));
       status(`Страница ${p}${pg.last > 1 ? ` из ${pg.last}` : ''} · собрано ${results.size}${total ? ` из ${total}` : ''}`, pg.last > 1 ? p / pg.last : null);
       emptyStreak = fresh ? 0 : emptyStreak + 1;
       if (pg.last <= 1 && emptyStreak >= 2) break; // unknown page count: stop when pages repeat
@@ -489,9 +677,9 @@
   async function viaClicks() {
     const total = totalCount();
     let page = 1;
-    const firstKey = () => (extractCards(document, location.href)[0] || {}).key;
+    const firstKey = () => (extractRecords(document, location.href)[0] || {}).key;
     for (;;) {
-      add(extractCards(document, location.href));
+      add(extractRecords(document, location.href));
       status(`Страница ${page} · собрано ${results.size}${total ? ` из ${total}` : ''}`, total ? results.size / total : null);
       if (stopped || page >= CONFIG.maxPages) break;
       const want = String(page + 1);
@@ -508,186 +696,253 @@
     }
   }
 
-  async function deepen() {
-    const list = [...results.values()].filter((r) => r.url);
+  let profilesLoaded = 0;
+  const profileUrls = () => [...new Set([...results.values()].map((r) => r.url).filter(Boolean))];
+
+  /** Host profiles: start-date window, rent, deposit, roommates, transport. One request per employer profile. */
+  async function loadProfiles() {
+    const urls = profileUrls();
+    const queue = [...urls];
+    const byUrl = new Map();
     let done = 0;
     const worker = async () => {
-      while (list.length && !stopped) {
-        const r = list.shift();
-        try {
-          const doc = await fetchDoc(r.url);
-          doc.querySelectorAll('nav,header,footer,script,style,form').forEach((n) => n.remove());
-          const text = blockText(doc.querySelector('main') || doc.body);
-          const more = parseListing(text, known);
-          for (const [k, v] of Object.entries(more)) if (v != null && v !== '' && (r[k] == null || r[k] === '')) r[k] = v;
-          r.text = `${r.text}\n\n${text}`.slice(0, 6000);
-        } catch { /* keep the card data */ }
+      while (queue.length && !stopped) {
+        const u = queue.shift();
+        try { byUrl.set(u, normalizeProfile(readProfile(await fetchDoc(u)))); } catch { /* keep the card data */ }
         done += 1;
-        status(`Подробности: ${done} из ${results.size}`, done / results.size);
-        await sleep(CONFIG.deepPauseMs);
+        status(`Профили работодателей: ${done} из ${urls.length}`, done / urls.length);
+        await sleep(CONFIG.deepPauseMs + Math.random() * 300);
       }
     };
     await Promise.all(Array.from({ length: CONFIG.deepConcurrency }, worker));
+    for (const r of results.values()) { const p = byUrl.get(r.url); if (p) mergeProfile(r, p); }
+    profilesLoaded = byUrl.size;
   }
 
   // ───────────────────────── report ─────────────────────────
 
-  function reportHtml(rows) {
-    const data = JSON.stringify(rows.map((r) => ({ ...r, text: r.text.slice(0, 4000) }))).replace(/</g, '\\u003c');
-    return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Офферы InterExchange</title>
-<style>
+  /** Runs inside the report page (serialized with toString) — must not use anything from the outer scope. */
+  function reportApp(ROWS, COLS, META) {
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const safe = (u) => (/^https?:\/\//i.test(u || '') ? u : '');
+    const HRU = { provided: 'предоставляется', assistance: 'помощь с поиском', none: 'нет', '': '—' };
+    const store = {
+      get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
+      set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } },
+    };
+    const fav = new Set(store.get('ix-fav', []));
+    const uniq = (a) => [...new Set(a.filter(Boolean))].sort();
+    const fill = (id, values) => $(id).insertAdjacentHTML('beforeend', values.map((v) => `<option>${esc(v)}</option>`).join(''));
+    fill('st', uniq(ROWS.map((r) => r.state)));
+    fill('rg', uniq(ROWS.map((r) => r.region)));
+    fill('pos', uniq(ROWS.map((r) => r.position)));
+    const IDS = ['q', 'st', 'rg', 'pos', 'hs', 'w', 'hr', 'rent', 'arr', 'dep', 'tp', 'so', 'strict', 'fav', 'no21', 'intv'];
+    const saved = store.get('ix-filters', {});
+    IDS.forEach((i) => { const el = $(i); if (saved[i] == null) return; if (el.type === 'checkbox') el.checked = saved[i]; else el.value = saved[i]; });
+    if (!META.profiles) $('dates-note').hidden = false;
+
+    const miss = (v) => v == null || v === '';
+    const read = () => Object.fromEntries(IDS.map((i) => [i, $(i).type === 'checkbox' ? $(i).checked : $(i).value]));
+    function pass(r, v) {
+      const need = (val, ok) => (miss(val) ? !v.strict : ok(val));
+      if (v.fav && !fav.has(r.key)) return false;
+      if (v.q) {
+        const hay = `${r.employer} ${r.position} ${r.city} ${r.state} ${r.business} ${r.text}`.toLowerCase();
+        if (!hay.includes(v.q.trim().toLowerCase())) return false;
+      }
+      if (v.st && r.state !== v.st) return false;
+      if (v.rg && r.region !== v.rg) return false;
+      if (v.pos && r.position !== v.pos) return false;
+      if (v.hs === 'provided' && r.housing !== 'provided') return false;
+      if (v.hs === 'any' && r.housing !== 'provided' && r.housing !== 'assistance') return false;
+      if (v.w !== '' && !need(r.wage, (x) => (r.wageMax || x) >= +v.w)) return false;
+      if (v.hr !== '' && !need(r.hours, (x) => (r.hoursMax || x) >= +v.hr)) return false;
+      if (v.rent !== '' && !need(r.rent, (x) => x <= +v.rent)) return false;
+      if (v.arr && !need(r.startFrom, (s) => s <= v.arr && (!r.startTo || v.arr <= r.startTo))) return false;
+      if (v.dep && !need(r.finishFrom, (f) => f <= v.dep)) return false;
+      if (v.tp === '1' && !r.tipped) return false;
+      if (v.tp === '0' && r.tipped) return false;
+      if (v.no21 && r.age21) return false;
+      if (v.intv && !r.interviews) return false;
+      return true;
+    }
+    const DESC = { weekly: 1, net: 1, wage: 1, hours: 1, openings: 1, lastVisited: 1 };
+    let shown = [];
+    function render() {
+      const v = read();
+      store.set('ix-filters', v);
+      shown = ROWS.filter((r) => pass(r, v));
+      const k = v.so;
+      shown.sort((a, b) => {
+        const x = a[k]; const y = b[k];
+        if (miss(x) && miss(y)) return 0;
+        if (miss(x)) return 1;
+        if (miss(y)) return -1;
+        if (typeof x === 'number') return DESC[k] ? y - x : x - y;
+        return DESC[k] ? String(y).localeCompare(String(x)) : String(x).localeCompare(String(y));
+      });
+      const cnt = (f) => ROWS.filter(f).length;
+      $('sum').textContent = `Всего: ${ROWS.length} · жильё предоставляется: ${cnt((r) => r.housing === 'provided')}`
+        + ` · помощь с жильём: ${cnt((r) => r.housing === 'assistance')} · с интервью: ${cnt((r) => r.interviews)}`
+        + ` · ★ ${fav.size} · собрано ${META.date}`;
+      $('cnt').textContent = `Подходит: ${shown.length}`;
+      const money = (a) => (a == null ? '—' : `$${a}`);
+      const range = (a, b) => (a ? esc(a) + (b && b !== a ? ` → ${esc(b)}` : '') : '—');
+      $('tb').innerHTML = shown.slice(0, 1500).map((r) => {
+        const flags = [
+          r.interviews ? `<span class="chip ok">интервью${r.interviewOn ? ` ${esc(r.interviewOn)}` : ''}</span>` : '',
+          r.age21 ? '<span class="chip warn">21+</span>' : '',
+          r.overtime === 'yes' ? '<span class="chip">overtime</span>' : '',
+          r.drugTest && /^yes/i.test(r.drugTest) ? '<span class="chip warn">drug test</span>' : '',
+        ].join('');
+        const housingExtra = [
+          r.rent != null ? `$${r.rent}/нед` : '',
+          r.shareBedroom ? `${r.shareBedroom} в комнате` : '',
+          r.deposit ? `залог $${r.deposit}` : '',
+        ].filter(Boolean).join(' · ');
+        return `<tr>
+          <td><button class="star${fav.has(r.key) ? ' on' : ''}" data-f="${esc(r.key)}" title="В избранное">★</button></td>
+          <td><b>${esc(r.position || '—')}</b><div>${esc(r.employer)}</div><div class="mut">${esc(r.business)}</div>
+            <div>${flags}</div><details><summary>описание</summary><pre>${esc(r.text)}${r.address ? `\n\nАдрес: ${esc(r.address)}` : ''}${r.meals ? `\nЕда: ${esc(r.meals)}` : ''}${r.transportCost != null ? `\nТранспорт: $${r.transportCost}/нед ${esc(r.distance || '')}` : ''}</pre></details></td>
+          <td>${esc([r.city, r.state].filter(Boolean).join(', ') || '—')}<div class="mut">${esc(r.region)}</div></td>
+          <td class="n">${money(r.wage)}${r.tipped ? '<div class="mut">+ чаевые</div>' : r.tipsSometimes ? '<div class="mut">иногда чаевые</div>' : ''}</td>
+          <td class="n">${r.hours == null ? '—' : esc(r.hours)}</td>
+          <td class="n"><b>${money(r.weekly)}</b></td>
+          <td class="n">${money(r.net)}</td>
+          <td><span class="h-${esc(r.housing)}">${esc(HRU[r.housing || ''])}</span>${housingExtra ? `<div class="mut">${housingExtra}</div>` : ''}</td>
+          <td class="d">${range(r.startFrom, r.startTo)}</td>
+          <td class="d">${range(r.finishFrom, r.finishTo)}</td>
+          <td class="n">${r.openings == null ? '—' : esc(r.openings)}</td>
+          <td>${safe(r.url) ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">Профиль</a>` : ''}</td></tr>`;
+      }).join('') + (shown.length > 1500 ? '<tr><td colspan="12" class="mut">Показаны первые 1500 — уточните фильтры или скачайте CSV.</td></tr>' : '');
+    }
+    document.addEventListener('input', (e) => { if (IDS.includes(e.target.id)) render(); });
+    document.addEventListener('click', (e) => {
+      const f = e.target.closest('[data-f]');
+      if (f) { const k = f.dataset.f; if (fav.has(k)) fav.delete(k); else fav.add(k); store.set('ix-fav', [...fav]); render(); return; }
+      const th = e.target.closest('th[data-k]');
+      if (th) { $('so').value = th.dataset.k; render(); }
+    });
+    $('reset').onclick = () => { IDS.forEach((i) => { const el = $(i); if (el.type === 'checkbox') el.checked = false; else el.value = i === 'so' ? 'weekly' : ''; }); render(); };
+    $('csv').onclick = () => {
+      const cell = (x) => { const s = x == null ? '' : String(x); return /[",;\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+      const val = (r, k) => {
+        if (k === 'housing') return HRU[r.housing || ''];
+        if (k === 'tipped' || k === 'age21') return r[k] == null ? '' : r[k] ? 'да' : 'нет';
+        if (k === 'overtime') return { yes: 'да', maybe: 'возможно' }[r.overtime] || '';
+        return r[k];
+      };
+      const csv = `﻿${[COLS.map((c) => c[1]), ...shown.map((r) => COLS.map(([k]) => val(r, k)))].map((row) => row.map(cell).join(';')).join('\r\n')}`;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+      a.download = 'interexchange-offers.csv';
+      a.click();
+    };
+    render();
+  }
+
+  const REPORT_CSS = `
 :root{--bg:#f6f7f9;--card:#fff;--fg:#1b1f24;--mut:#5b6470;--line:#dde2e8;--acc:#1f6feb;--good:#1a7f37;--warn:#9a6700;--chip:#eef2f7}
 @media (prefers-color-scheme:dark){:root{--bg:#0f1216;--card:#171b21;--fg:#e6e9ee;--mut:#9aa4b2;--line:#2a313b;--acc:#4c8dff;--good:#3fb950;--warn:#d29922;--chip:#222934}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
-header{padding:20px 16px 8px;max-width:1400px;margin:auto}h1{font-size:22px;margin:0 0 4px}.mut{color:var(--mut)}
-.f{max-width:1400px;margin:auto;padding:8px 16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px}
+header{padding:20px 16px 8px;max-width:1500px;margin:auto}h1{font-size:22px;margin:0 0 4px}.mut{color:var(--mut);font-size:12px}
+.f{max-width:1500px;margin:auto;padding:8px 16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px}
 .f label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--mut)}
 .f input,.f select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}
 .f .cb{flex-direction:row;align-items:center;gap:6px;font-size:13px;color:var(--fg)}
-.bar{max-width:1400px;margin:auto;padding:8px 16px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.note{max-width:1500px;margin:0 auto;padding:0 16px;color:var(--warn);font-size:13px}
+.bar{max-width:1500px;margin:auto;padding:8px 16px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 button{font:inherit;padding:6px 12px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
 button.p{background:var(--acc);border-color:var(--acc);color:#fff}
-.wrap{max-width:1400px;margin:auto;padding:0 16px 40px;overflow-x:auto}
-table{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--line);border-radius:8px}
+.wrap{max-width:1500px;margin:auto;padding:0 16px 40px;overflow-x:auto}
+table{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--line)}
 th,td{padding:8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-th{font-size:12px;color:var(--mut);font-weight:600;white-space:nowrap;cursor:pointer;position:sticky;top:0;background:var(--card)}
-td.n{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
-.chip{display:inline-block;padding:1px 8px;border-radius:10px;background:var(--chip);font-size:12px;white-space:nowrap}
+th{font-size:12px;color:var(--mut);font-weight:600;white-space:nowrap;position:sticky;top:0;background:var(--card)}th[data-k]{cursor:pointer}
+td.n{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}td.d{white-space:nowrap;font-size:13px}
+.chip{display:inline-block;padding:1px 7px;margin:2px 4px 0 0;border-radius:10px;background:var(--chip);font-size:11px;white-space:nowrap}
+.chip.ok{color:var(--good)}.chip.warn{color:var(--warn)}
 .h-provided{color:var(--good);font-weight:600}.h-assistance{color:var(--warn)}
 .star{background:none;border:0;font-size:18px;padding:0 4px;color:var(--mut)}.star.on{color:#e3a008}
-details summary{cursor:pointer;color:var(--acc);font-size:12px}details pre{white-space:pre-wrap;font:12px/1.4 ui-monospace,monospace;max-width:520px;color:var(--mut)}
-a{color:var(--acc)}
-</style></head><body>
+details summary{cursor:pointer;color:var(--acc);font-size:12px}details pre{white-space:pre-wrap;font:12px/1.4 ui-monospace,monospace;max-width:560px;color:var(--mut)}
+a{color:var(--acc)}`;
+
+  function reportHtml(rows) {
+    const json = (x) => JSON.stringify(x).replace(/</g, '\\u003c');
+    const meta = { date: new Date().toISOString().slice(0, 10), profiles: profilesLoaded };
+    return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Офферы InterExchange</title><style>${REPORT_CSS}</style></head><body>
 <header><h1>Офферы InterExchange</h1><div class="mut" id="sum"></div></header>
 <div class="f">
 <label>Поиск<input id="q" placeholder="работодатель, город, слово…"></label>
 <label>Штат<select id="st"><option value="">Все</option></select></label>
+<label>Регион<select id="rg"><option value="">Все</option></select></label>
 <label>Должность<select id="pos"><option value="">Все</option></select></label>
 <label>Жильё<select id="hs"><option value="">Любое</option><option value="provided">Предоставляется</option><option value="any">Предоставляется или помощь</option></select></label>
 <label>Ставка от, $/ч<input id="w" type="number" step="0.5" min="0"></label>
 <label>Часов в неделю от<input id="hr" type="number" min="0"></label>
-<label>Начало не раньше<input id="ds" type="date"></label>
-<label>Конец не позже<input id="de" type="date"></label>
+<label>Аренда до, $/нед<input id="rent" type="number" min="0"></label>
+<label>Я приезжаю (окно начала)<input id="arr" type="date"></label>
+<label>Мне уезжать не позже<input id="dep" type="date"></label>
 <label>Чаевые<select id="tp"><option value="">Неважно</option><option value="1">Только с чаевыми</option><option value="0">Без чаевых</option></select></label>
-<label>Сортировка<select id="so"><option value="weekly">≈$ в неделю</option><option value="wage">Ставка</option><option value="hours">Часы</option><option value="start">Дата начала</option><option value="employer">Работодатель</option><option value="state">Штат</option></select></label>
+<label>Сортировка<select id="so"><option value="weekly">≈$ в неделю</option><option value="net">≈$ после аренды</option><option value="wage">Ставка</option><option value="hours">Часы</option><option value="startFrom">Дата начала</option><option value="openings">Мест больше</option><option value="lastVisited">Работодатель активнее</option><option value="employer">Работодатель</option><option value="state">Штат</option></select></label>
+<label class="cb"><input id="intv" type="checkbox">Только с интервью</label>
+<label class="cb"><input id="no21" type="checkbox">Скрыть «только 21+»</label>
 <label class="cb"><input id="strict" type="checkbox">Строго: прятать, если поле не указано</label>
 <label class="cb"><input id="fav" type="checkbox">Только ★</label>
 </div>
+<p class="note" id="dates-note" hidden>Даты начала, аренда и соседи есть только в профилях работодателей — нажмите «Догрузить профили» на панели и откройте отчёт заново.</p>
 <div class="bar"><b id="cnt"></b><span style="flex:1"></span><button id="reset">Сбросить фильтры</button><button class="p" id="csv">Скачать CSV (показанные)</button></div>
-<div class="wrap"><table><thead><tr><th></th><th data-k="employer">Работодатель</th><th data-k="position">Должность</th><th data-k="state">Город</th><th data-k="wage">$/ч</th><th data-k="hours">Ч/нед</th><th data-k="weekly">≈$/нед</th><th>Жильё</th><th data-k="start">Даты</th><th>Чаевые</th><th>Интервью</th><th></th></tr></thead><tbody id="tb"></tbody></table></div>
-<script>
-const ROWS=${data};
-const CSV_COLUMNS=${JSON.stringify(CSV_COLUMNS)};
-const HRU={provided:'предоставляется',assistance:'помощь с поиском',none:'нет','':''};
-const $=(id)=>document.getElementById(id);
-const esc=(s)=>String(s??'').replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const safe=(u)=>/^https?:\\/\\//i.test(u||'')?u:'';
-let fav=new Set();try{fav=new Set(JSON.parse(localStorage.getItem('ix-fav')||'[]'))}catch{}
-const saveFav=()=>{try{localStorage.setItem('ix-fav',JSON.stringify([...fav]))}catch{}};
-const ids=['q','st','pos','hs','w','hr','ds','de','tp','so','strict','fav'];
-try{const s=JSON.parse(localStorage.getItem('ix-filters')||'{}');ids.forEach((i)=>{if(s[i]!=null){const el=$(i);el.type==='checkbox'?el.checked=s[i]:el.value=s[i]}})}catch{}
-const states=[...new Set(ROWS.map(r=>r.state).filter(Boolean))].sort();
-$('st').insertAdjacentHTML('beforeend',states.map(s=>'<option>'+esc(s)+'</option>').join(''));
-const poss=[...new Set(ROWS.flatMap(r=>(r.position||'').split(', ')).filter(Boolean))].sort();
-$('pos').insertAdjacentHTML('beforeend',poss.map(s=>'<option>'+esc(s)+'</option>').join(''));
-ids.forEach(i=>{try{const s=JSON.parse(localStorage.getItem('ix-filters')||'{}');if(s[i]!=null&&(i==='st'||i==='pos'))$(i).value=s[i]}catch{}});
-let shown=[];
-function render(){
-  const v={};ids.forEach(i=>{const el=$(i);v[i]=el.type==='checkbox'?el.checked:el.value});
-  try{localStorage.setItem('ix-filters',JSON.stringify(v))}catch{}
-  const q=v.q.trim().toLowerCase(),w=parseFloat(v.w),hr=parseFloat(v.hr),strict=v.strict;
-  const miss=(x)=>x==null||x==='';
-  shown=ROWS.filter(r=>{
-    if(v.fav&&!fav.has(r.key))return false;
-    if(q&&!(r.employer+' '+r.position+' '+r.city+' '+r.state+' '+r.text).toLowerCase().includes(q))return false;
-    if(v.st&&r.state!==v.st)return false;
-    if(v.pos&&!(r.position||'').split(', ').includes(v.pos))return false;
-    if(v.hs==='provided'&&!(r.housing==='provided'||(!strict&&!r.housing)))return false;
-    if(v.hs==='any'&&!(r.housing==='provided'||r.housing==='assistance'||(!strict&&!r.housing)))return false;
-    if(!isNaN(w)&&(miss(r.wage)?strict:(r.wageMax||r.wage)<w))return false;
-    if(!isNaN(hr)&&(miss(r.hours)?strict:(r.hoursMax||r.hours)<hr))return false;
-    if(v.ds&&(miss(r.start)?strict:r.start<v.ds))return false;
-    if(v.de&&(miss(r.end)?strict:r.end>v.de))return false;
-    if(v.tp==='1'&&(r.tipped==null?strict:!r.tipped))return false;
-    if(v.tp==='0'&&(r.tipped==null?strict:r.tipped))return false;
-    return true;
-  });
-  const k=v.so,num=['weekly','wage','hours'].includes(k);
-  shown.sort((a,b)=>{const x=a[k],y=b[k];if(miss(x)&&miss(y))return 0;if(miss(x))return 1;if(miss(y))return -1;return num?y-x:String(x).localeCompare(String(y))});
-  const hp=ROWS.filter(r=>r.housing==='provided').length,ha=ROWS.filter(r=>r.housing==='assistance').length;
-  $('sum').textContent='Всего собрано: '+ROWS.length+' · жильё предоставляется: '+hp+' · помощь с жильём: '+ha+' · ★ '+fav.size;
-  $('cnt').textContent='Подходит: '+shown.length;
-  $('tb').innerHTML=shown.slice(0,1500).map(r=>{
-    const money=(a,b)=>a==null?'—':'$'+a+(b?'–'+b:'');
-    const dates=r.start?esc(r.start)+(r.end?' → '+esc(r.end):''):'—';
-    return '<tr><td><button class="star'+(fav.has(r.key)?' on':'')+'" data-f="'+esc(r.key)+'" title="В избранное">★</button></td>'
-      +'<td><b>'+esc(r.employer)+'</b><details><summary>текст</summary><pre>'+esc(r.text)+'</pre></details></td>'
-      +'<td>'+esc(r.position||'—')+'</td><td>'+esc([r.city,r.state].filter(Boolean).join(', ')||'—')+'</td>'
-      +'<td class="n">'+money(r.wage,r.wageMax)+'</td><td class="n">'+(r.hours==null?'—':esc(r.hours)+(r.hoursMax?'–'+esc(r.hoursMax):''))+'</td>'
-      +'<td class="n"><b>'+(r.weekly==null?'—':'$'+r.weekly)+'</b></td>'
-      +'<td><span class="h-'+esc(r.housing)+'">'+esc(HRU[r.housing||'']||'—')+'</span>'+(r.housingCost?'<div class="mut" style="font-size:12px">'+esc(r.housingCost)+'</div>':'')+'</td>'
-      +'<td style="white-space:nowrap">'+dates+'</td><td>'+(r.tipped==null?'—':r.tipped?'да':'нет')+'</td>'
-      +'<td style="font-size:12px">'+esc(r.interviews||'—')+'</td>'
-      +'<td>'+(safe(r.url)?'<a href="'+esc(r.url)+'" target="_blank" rel="noopener">Открыть</a>':'')+'</td></tr>';
-  }).join('')+(shown.length>1500?'<tr><td colspan="12" class="mut">Показаны первые 1500 — уточните фильтры или скачайте CSV.</td></tr>':'');
-}
-document.addEventListener('input',(e)=>{if(ids.includes(e.target.id))render()});
-document.addEventListener('click',(e)=>{
-  const f=e.target.closest('[data-f]');if(f){const k=f.dataset.f;fav.has(k)?fav.delete(k):fav.add(k);saveFav();render();return}
-  const th=e.target.closest('th[data-k]');if(th){$('so').value=th.dataset.k;render()}
-});
-$('reset').onclick=()=>{ids.forEach(i=>{const el=$(i);if(el.type==='checkbox')el.checked=false;else el.value=i==='so'?'weekly':''});render()};
-$('csv').onclick=()=>{
-  const cell=(v)=>{const s=v==null?'':String(v);return /[",;\\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s};
-  const val=(r,k)=>k==='housing'?HRU[r.housing||'']:k==='tipped'?(r.tipped==null?'':r.tipped?'да':'нет'):r[k];
-  const csv='\\uFEFF'+[CSV_COLUMNS.map(c=>c[1]),...shown.map(r=>CSV_COLUMNS.map(([k])=>val(r,k)))].map(r=>r.map(cell).join(';')).join('\\r\\n');
-  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='interexchange-offers.csv';a.click();
-};
-render();
-</script></body></html>`;
+<div class="wrap"><table><thead><tr><th></th><th data-k="employer">Должность / работодатель</th><th data-k="state">Город</th><th data-k="wage">$/ч</th><th data-k="hours">Ч/нед</th><th data-k="weekly">≈$/нед</th><th data-k="net">После аренды</th><th>Жильё</th><th data-k="startFrom">Начало</th><th>Конец</th><th data-k="openings">Мест</th><th></th></tr></thead><tbody id="tb"></tbody></table></div>
+<script>(${reportApp.toString()})(${json(rows)}, ${json(CSV_COLUMNS)}, ${json(meta)});</script>
+</body></html>`;
   }
 
   function finish() {
     const rows = [...results.values()];
     window.__ixOffers = rows;
-    stopBtn.remove();
     if (!rows.length) {
-      status('Не нашёл вакансий на странице. Сохраните страницу (Cmd/Ctrl+S → «Веб-страница, только HTML») и пришлите файл — подстрою скрипт под разметку.', 0);
+      status('Не нашёл вакансий на странице. Сохраните страницу (Cmd/Ctrl+S → «Веб-страница, только HTML») и пришлите файл — подстрою скрипт.', 0);
+      buttons([['Закрыть', () => panel.remove()]]);
       return;
     }
     const hp = rows.filter((r) => r.housing === 'provided').length;
-    const wage = rows.filter((r) => r.wage != null).length;
-    status(`Готово: ${rows.length} вакансий (жильё предоставляется: ${hp}; ставка распознана у ${wage}).`, 1);
+    const urls = profileUrls();
+    status(`Готово: ${rows.length} вакансий, жильё предоставляется у ${hp}.`
+      + (profilesLoaded ? ` Профили работодателей: ${profilesLoaded}.` : ` Даты начала и аренда — в профилях (${urls.length} шт., ~${Math.max(1, Math.ceil(urls.length * 0.35 / 60))} мин).`), 1);
     const stamp = new Date().toISOString().slice(0, 10);
-    const html = reportHtml(rows);
-    button('Открыть отчёт', () => {
-      const w = window.open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
-      if (!w) download(`interexchange-offers-${stamp}.html`, html, 'text/html');
-    }, true);
-    button('Скачать отчёт', () => download(`interexchange-offers-${stamp}.html`, html, 'text/html'));
-    button('CSV', () => download(`interexchange-offers-${stamp}.csv`, toCsv(rows), 'text/csv'));
-    button('JSON', () => download(`interexchange-offers-${stamp}.json`, JSON.stringify(rows, null, 2), 'application/json'));
-    button('Закрыть', () => panel.remove());
+    const list = [
+      ['Открыть отчёт', () => {
+        const html = reportHtml([...results.values()]);
+        const w = window.open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+        if (!w) download(`interexchange-offers-${stamp}.html`, html, 'text/html');
+      }, true],
+    ];
+    if (!profilesLoaded && urls.length) list.push(['Догрузить профили', async () => { stoppable(); await loadProfiles(); finish(); }]);
+    list.push(
+      ['Скачать отчёт', () => download(`interexchange-offers-${stamp}.html`, reportHtml([...results.values()]), 'text/html')],
+      ['CSV', () => download(`interexchange-offers-${stamp}.csv`, toCsv([...results.values()]), 'text/csv')],
+      ['Закрыть', () => panel.remove()],
+    );
+    buttons(list);
     console.log(`[InterExchange] собрано ${rows.length}. Данные: window.__ixOffers`);
-    console.table(rows.filter((r) => r.weekly).sort((a, b) => b.weekly - a.weekly).slice(0, 20)
-      .map((r) => ({ employer: r.employer, position: r.position, city: `${r.city}, ${r.state}`, wage: r.wage, hours: r.hours, weekly: r.weekly, housing: r.housing })));
   }
 
   (async () => {
+    stoppable();
     try {
       status('Смотрю, как устроен список…');
       const pg = pagination(document, location.href);
       let mode = 'clicks';
       if (pg.url) {
         try {
-          const probe = await fetchDoc(pg.url(pg.last > 1 ? 2 : 1));
-          if (extractCards(probe, pg.url(2)).length) mode = 'fetch';
+          const probeUrl = pg.url(pg.last > 1 ? 2 : 1);
+          if (extractRecords(await fetchDoc(probeUrl), probeUrl).length) mode = 'fetch';
         } catch { /* fall back to clicking */ }
       }
       if (mode === 'fetch') await viaFetch(pg);
       else await viaClicks();
-      if (CONFIG.deep && !stopped) await deepen();
+      if (CONFIG.deep && !stopped) await loadProfiles();
     } catch (e) {
       console.error(e);
       status(`Ошибка: ${e.message}. Отчёт — из того, что успел собрать.`);

@@ -35,11 +35,15 @@ and hand them to the user; do not put them in the repo.
 - `server/emails.js` — crawler with SSRF protection (checks every redirect hop), Cloudflare email decoding, ranking
 - `server/index.js` — local Node server (static + routes), no dependencies
 - `tools/interexchange-collector.js` — standalone script pasted into the browser console on the participant's
-  InterExchange "Job Listings" page: walks all pages (fetch + DOMParser, or clicks for a JS-rendered list), parses
-  wage/hours/housing/dates/location from card text, shows a panel and builds a self-contained HTML report with filters
-  + CSV. Pure parsers are exposed as `globalThis.__IX` when loaded without a DOM (unit tests); browser test against a
-  fake listings site is `test/e2e-interexchange.mjs`. The real site needs a login — nothing about its markup is known
-  for sure, so card/pagination detection is heuristic
+  InterExchange "Job Listings" page (app.interexchange.org/wt/job_listings, Rails, server-rendered, `?page=N`).
+  Cards are `div.card.job_listing#job_listing_<uuid>` — the uuid is the key (the header link points to the *employer
+  profile*, shared by several listings). Data comes from `<h5>Label</h5>` pairs, `.badge`s (Tipped / Overtime /
+  Housing Provided|Assistance; no badge = no housing) and the right column (`$x /hour`, `N hours /week`, `$x rent /week`).
+  Start dates, rent, deposit, roommates live only on host profile pages — loaded on demand ("Догрузить профили").
+  Builds a self-contained HTML report (`reportApp` is serialized with `toString`, so it must not use outer scope).
+  Generic link/repeated-block parser is kept as a fallback for other markup. Pure parsers are exposed as
+  `globalThis.__IX` without a DOM (unit tests); `test/e2e-interexchange.mjs` serves made-up pages in the same markup.
+  Never commit real pages from the user's account (they contain their name and application ids)
 - `api/*.js` — thin Vercel function wrappers; `vercel.json` serves `public/` and sets `maxDuration: 60`
 
 ## Commands
