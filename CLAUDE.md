@@ -40,6 +40,9 @@ and hand them to the user; do not put them in the repo.
   profile*, shared by several listings). Data comes from `<h5>Label</h5>` pairs, `.badge`s (Tipped / Overtime /
   Housing Provided|Assistance; no badge = no housing) and the right column (`$x /hour`, `N hours /week`, `$x rent /week`).
   Start dates, rent, deposit, roommates live only on host profile pages — loaded on demand ("Догрузить профили").
+  The site answers HTTP 403 to fast request bursts (seen after ~38 pages at ~1 req/s): requests go one at a time
+  with 2.5–3.5 s pauses; on 403/429/503 wait (Retry-After or 90 s, doubling), then pause with «Продолжить». State
+  lives in `window.__ixState`, so pasting the script again resumes. Tests override timings via `window.__ixConfig`.
   Builds a self-contained HTML report (`reportApp` is serialized with `toString`, so it must not use outer scope).
   Generic link/repeated-block parser is kept as a fallback for other markup. Pure parsers are exposed as
   `globalThis.__IX` without a DOM (unit tests); `test/e2e-interexchange.mjs` serves made-up pages in the same markup.

@@ -18,12 +18,15 @@
 (() => {
   'use strict';
 
+  // Сайт блокирует частые запросы (HTTP 403), поэтому всё идёт по одному запросу с паузой.
   const CONFIG = {
-    pauseMs: 700, // пауза между страницами списка
+    pauseMs: 2500, // пауза между страницами списка
+    deepPauseMs: 2500, // пауза между профилями работодателей
     deep: false, // true — сразу догрузить профили работодателей (иначе — кнопкой на панели)
-    deepConcurrency: 3,
-    deepPauseMs: 500,
+    blockWaitMs: 90000, // сайт ответил 403/429 — ждём столько, потом вдвое дольше
+    blockRetries: 2, // столько повторов после блокировки, потом пауза с кнопкой «Продолжить»
     maxPages: 300,
+    ...(typeof window !== 'undefined' && window.__ixConfig ? window.__ixConfig : {}),
   };
 
   // ───────────────────────── text helpers (pure, unit-tested) ─────────────────────────
@@ -641,7 +644,11 @@
 
   // ───────────────────────── collect ─────────────────────────
 
-  const results = new Map();
+  // Survives pasting the script again on the same page (no reload): collection resumes where it stopped.
+  const state = window.__ixState || (window.__ixState = {
+    results: new Map(), pg: null, mode: '', nextPage: 1, pagesDone: false, paused: '', profiles: new Map(),
+  });
+  const results = state.results;
   const add = (records) => {
     let fresh = 0;
     for (const r of records) {
@@ -653,24 +660,58 @@
     return fresh;
   };
 
-  async function fetchDoc(url) {
-    const r = await fetch(url, { credentials: 'include', headers: { accept: 'text/html' } });
-    if (!r.ok) throw new Error(`HTTP ${r.status} на ${url}`);
-    return new DOMParser().parseFromString(await r.text(), 'text/html');
+  class Blocked extends Error {}
+
+  async function countdown(ms, text) {
+    const until = Date.now() + ms;
+    while (!stopped && Date.now() < until) {
+      const left = Math.ceil((until - Date.now()) / 1000);
+      status(`${text} ${left >= 60 ? `${Math.floor(left / 60)} мин ${left % 60} с` : `${left} с`}…`);
+      await sleep(Math.min(1000, until - Date.now()));
+    }
   }
 
+  /** GET a page of the site with the user's session. On 403/429/503 waits and retries, then throws Blocked. */
+  async function fetchDoc(url) {
+    let wait = CONFIG.blockWaitMs;
+    for (let attempt = 0; ; attempt += 1) {
+      const r = await fetch(url, { credentials: 'include', headers: { accept: 'text/html' } });
+      if (r.ok) {
+        const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+        if (doc.querySelector('input[type=password]')) throw new Error('похоже, сессия закончилась — войдите в InterExchange заново');
+        return doc;
+      }
+      if (![403, 429, 503].includes(r.status)) throw new Error(`HTTP ${r.status} на ${url}`);
+      if (attempt >= CONFIG.blockRetries || stopped) throw new Blocked(`HTTP ${r.status}`);
+      const retryAfter = Number(r.headers.get('retry-after'));
+      await countdown(retryAfter > 0 ? retryAfter * 1000 : wait, `Сайт просит притормозить (HTTP ${r.status}). Повторю через`);
+      wait *= 2;
+    }
+  }
+
+  /** Server-rendered pages: fetch ?page=N one by one. Returns false when the fetched page has no listings. */
   async function viaFetch(pg) {
     const total = totalCount();
     const lastPage = Math.min(pg.last > 1 ? pg.last : CONFIG.maxPages, CONFIG.maxPages);
     let emptyStreak = 0;
-    for (let p = 1; p <= lastPage && !stopped; p += 1) {
+    for (let p = state.nextPage; p <= lastPage && !stopped; p += 1) {
       const url = pg.url(p);
-      const fresh = add(extractRecords(await fetchDoc(url), url));
+      let doc;
+      try { doc = await fetchDoc(url); } catch (e) {
+        if (e instanceof Blocked) { state.paused = 'pages'; return true; }
+        throw e;
+      }
+      const records = extractRecords(doc, url);
+      if (p === 1 && !records.length && !results.size) return false;
+      const fresh = add(records);
+      state.nextPage = p + 1;
       status(`Страница ${p}${pg.last > 1 ? ` из ${pg.last}` : ''} · собрано ${results.size}${total ? ` из ${total}` : ''}`, pg.last > 1 ? p / pg.last : null);
       emptyStreak = fresh ? 0 : emptyStreak + 1;
       if (pg.last <= 1 && emptyStreak >= 2) break; // unknown page count: stop when pages repeat
-      await sleep(CONFIG.pauseMs + Math.random() * 300);
+      if (p < lastPage) await sleep(CONFIG.pauseMs + Math.random() * 1000);
     }
+    if (!stopped) state.pagesDone = true;
+    return true;
   }
 
   /** Pagination without real links (single-page app): click "next" and wait for the list to change. */
@@ -694,29 +735,48 @@
       page += 1;
       await sleep(CONFIG.pauseMs);
     }
+    if (!stopped) state.pagesDone = true;
   }
 
-  let profilesLoaded = 0;
-  const profileUrls = () => [...new Set([...results.values()].map((r) => r.url).filter(Boolean))];
+  async function collectPages() {
+    if (!state.mode) {
+      status('Смотрю, как устроен список…');
+      state.pg = pagination(document, location.href);
+      state.mode = state.pg.url ? 'fetch' : 'clicks';
+    }
+    if (state.mode === 'fetch' && !(await viaFetch(state.pg))) state.mode = 'clicks';
+    if (state.mode === 'clicks') await viaClicks();
+  }
 
-  /** Host profiles: start-date window, rent, deposit, roommates, transport. One request per employer profile. */
+  const HOUSING_ORDER = { provided: 0, assistance: 1 };
+  /** Employer profiles still to load; employers with housing first. */
+  const pendingProfiles = () => {
+    const best = new Map();
+    for (const r of results.values()) {
+      if (!r.url || state.profiles.has(r.url)) continue;
+      const rank = HOUSING_ORDER[r.housing] ?? 2;
+      if (!best.has(r.url) || rank < best.get(r.url)) best.set(r.url, rank);
+    }
+    return [...best].sort((a, b) => a[1] - b[1]).map(([u]) => u);
+  };
+  const profilesLoaded = () => [...state.profiles.values()].filter(Boolean).length;
+
+  /** Host profiles: start-date window, rent, deposit, roommates, transport. One request at a time. */
   async function loadProfiles() {
-    const urls = profileUrls();
-    const queue = [...urls];
-    const byUrl = new Map();
-    let done = 0;
-    const worker = async () => {
-      while (queue.length && !stopped) {
-        const u = queue.shift();
-        try { byUrl.set(u, normalizeProfile(readProfile(await fetchDoc(u)))); } catch { /* keep the card data */ }
-        done += 1;
-        status(`Профили работодателей: ${done} из ${urls.length}`, done / urls.length);
-        await sleep(CONFIG.deepPauseMs + Math.random() * 300);
+    const queue = pendingProfiles();
+    const total = state.profiles.size + queue.length;
+    for (let i = 0; i < queue.length && !stopped; i += 1) {
+      const u = queue[i];
+      let profile = null;
+      try { profile = normalizeProfile(readProfile(await fetchDoc(u))); } catch (e) {
+        if (e instanceof Blocked) { state.paused = 'profiles'; return; }
+        if (/сессия/.test(e.message)) throw e;
       }
-    };
-    await Promise.all(Array.from({ length: CONFIG.deepConcurrency }, worker));
-    for (const r of results.values()) { const p = byUrl.get(r.url); if (p) mergeProfile(r, p); }
-    profilesLoaded = byUrl.size;
+      state.profiles.set(u, profile);
+      if (profile) for (const r of results.values()) if (r.url === u) mergeProfile(r, profile);
+      status(`Профили работодателей: ${state.profiles.size} из ${total}`, state.profiles.size / total);
+      if (i < queue.length - 1) await sleep(CONFIG.deepPauseMs + Math.random() * 1000);
+    }
   }
 
   // ───────────────────────── report ─────────────────────────
@@ -869,7 +929,7 @@ a{color:var(--acc)}`;
 
   function reportHtml(rows) {
     const json = (x) => JSON.stringify(x).replace(/</g, '\\u003c');
-    const meta = { date: new Date().toISOString().slice(0, 10), profiles: profilesLoaded };
+    const meta = { date: new Date().toISOString().slice(0, 10), profiles: profilesLoaded() };
     return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Офферы InterExchange</title><style>${REPORT_CSS}</style></head><body>
 <header><h1>Офферы InterExchange</h1><div class="mut" id="sum"></div></header>
@@ -898,28 +958,42 @@ a{color:var(--acc)}`;
 </body></html>`;
   }
 
+  const minutes = (n, pauseMs) => Math.max(1, Math.round((n * (pauseMs + 1000)) / 60000));
+
   function finish() {
     const rows = [...results.values()];
     window.__ixOffers = rows;
-    if (!rows.length) {
+    if (!rows.length && !state.paused) {
       status('Не нашёл вакансий на странице. Сохраните страницу (Cmd/Ctrl+S → «Веб-страница, только HTML») и пришлите файл — подстрою скрипт.', 0);
       buttons([['Закрыть', () => panel.remove()]]);
       return;
     }
     const hp = rows.filter((r) => r.housing === 'provided').length;
-    const urls = profileUrls();
-    status(`Готово: ${rows.length} вакансий, жильё предоставляется у ${hp}.`
-      + (profilesLoaded ? ` Профили работодателей: ${profilesLoaded}.` : ` Даты начала и аренда — в профилях (${urls.length} шт., ~${Math.max(1, Math.ceil(urls.length * 0.35 / 60))} мин).`), 1);
+    const pending = pendingProfiles().length;
+    const loaded = profilesLoaded();
+    const wait = 'Сайт временно ограничил запросы. Подождите 10–15 минут и нажмите «Продолжить» (страницу не перезагружайте)';
+    let text;
+    if (state.paused === 'pages') text = `${wait}. Собрано ${rows.length} вакансий, остановился на странице ${state.nextPage}.`;
+    else if (state.paused === 'profiles') text = `${wait}. Профили: ${loaded} загружено, осталось ${pending}.`;
+    else if (!state.pagesDone) text = `Остановлено: ${rows.length} вакансий, следующая страница — ${state.nextPage}.`;
+    else {
+      text = `Готово: ${rows.length} вакансий, жильё предоставляется у ${hp}.`;
+      text += pending
+        ? ` ${loaded ? `Профили работодателей: ${loaded}, осталось ${pending}` : `Даты начала и аренда — в профилях работодателей (${pending} шт.)`}, ~${minutes(pending, CONFIG.deepPauseMs)} мин.`
+        : ` Профили работодателей: ${loaded}.`;
+    }
+    if (state.error) { text = `${state.error} ${text}`; state.error = ''; }
+    status(text, state.paused ? null : 1);
     const stamp = new Date().toISOString().slice(0, 10);
-    const list = [
+    const list = [];
+    if (!state.pagesDone) list.push([`Продолжить сбор (стр. ${state.nextPage})`, () => run('pages'), true]);
+    else if (pending) list.push([state.paused === 'profiles' || loaded ? `Продолжить профили (${pending})` : 'Догрузить профили', () => run('profiles'), state.paused === 'profiles']);
+    list.push(
       ['Открыть отчёт', () => {
         const html = reportHtml([...results.values()]);
         const w = window.open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
         if (!w) download(`interexchange-offers-${stamp}.html`, html, 'text/html');
-      }, true],
-    ];
-    if (!profilesLoaded && urls.length) list.push(['Догрузить профили', async () => { stoppable(); await loadProfiles(); finish(); }]);
-    list.push(
+      }, !state.paused && state.pagesDone],
       ['Скачать отчёт', () => download(`interexchange-offers-${stamp}.html`, reportHtml([...results.values()]), 'text/html')],
       ['CSV', () => download(`interexchange-offers-${stamp}.csv`, toCsv([...results.values()]), 'text/csv')],
       ['Закрыть', () => panel.remove()],
@@ -928,25 +1002,20 @@ a{color:var(--acc)}`;
     console.log(`[InterExchange] собрано ${rows.length}. Данные: window.__ixOffers`);
   }
 
-  (async () => {
+  async function run(what) {
     stoppable();
+    state.paused = '';
     try {
-      status('Смотрю, как устроен список…');
-      const pg = pagination(document, location.href);
-      let mode = 'clicks';
-      if (pg.url) {
-        try {
-          const probeUrl = pg.url(pg.last > 1 ? 2 : 1);
-          if (extractRecords(await fetchDoc(probeUrl), probeUrl).length) mode = 'fetch';
-        } catch { /* fall back to clicking */ }
-      }
-      if (mode === 'fetch') await viaFetch(pg);
-      else await viaClicks();
-      if (CONFIG.deep && !stopped) await loadProfiles();
+      if (what === 'pages') {
+        await collectPages();
+        if (CONFIG.deep && state.pagesDone && !stopped) await loadProfiles();
+      } else if (what === 'profiles') await loadProfiles();
     } catch (e) {
       console.error(e);
-      status(`Ошибка: ${e.message}. Отчёт — из того, что успел собрать.`);
+      state.error = `Ошибка: ${e.message}.`;
     }
     finish();
-  })();
+  }
+
+  run(state.pagesDone ? 'none' : 'pages');
 })();

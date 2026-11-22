@@ -91,11 +91,17 @@ const spaCard = (j) => `<div class="card listing"><div class="card-body"><h5 cla
 const SPA_TOTAL = 25;
 
 let profileHits = 0;
+const block = { pages: new Set(), profiles: false, hits: 0 }; // simulated rate limiting (HTTP 403)
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
   res.setHeader('content-type', 'text/html; charset=utf-8');
-  if (u.pathname === '/wt/job_listings') return res.end(ixPage(+(u.searchParams.get('page') || 1)));
+  const forbid = () => { block.hits += 1; res.statusCode = 403; return res.end('Forbidden'); };
+  if (u.pathname === '/wt/job_listings') {
+    const p = +(u.searchParams.get('page') || 1);
+    return block.pages.has(p) ? forbid() : res.end(ixPage(p));
+  }
   const pm = u.pathname.match(/^\/wt\/employers\/(\d+)\/enrollment_profiles\/(\d+)$/);
+  if (pm && block.profiles) return forbid();
   if (pm) {
     const emp = EMPLOYERS.find((e) => e.e === +pm[1]);
     if (emp) { profileHits += 1; return res.end(ixProfile(emp)); }
@@ -121,11 +127,13 @@ const browser = await chromium.launch();
 const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, acceptDownloads: true });
 const errors = [];
 
+const FAST = { pauseMs: 30, deepPauseMs: 30, blockWaitMs: 200, blockRetries: 1 };
 async function collect(url, ready) {
   const page = await ctx.newPage();
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(url);
   await page.waitForSelector(ready);
+  await page.evaluate((c) => { window.__ixConfig = c; }, FAST);
   await page.addScriptTag({ content: SCRIPT });
   await page.waitForFunction(() => Array.isArray(window.__ixOffers), null, { timeout: 30000 });
   return page;
@@ -186,6 +194,28 @@ try {
   await report.screenshot({ path: path.join(outDir, 'ix-report.png'), fullPage: true });
   await page.close();
   await report.close();
+
+  // 1b) Rate limiting: 403 → one retry after a wait → pause; resume by pasting again, then by the button
+  block.pages.add(2);
+  block.hits = 0;
+  const limited = await collect(`${base}/wt/job_listings`, '.job_listing');
+  const panelText = () => limited.textContent('#ix-collector');
+  assert.match(await panelText(), /ограничил запросы.*странице 2/);
+  assert.equal(block.hits, 2, 'one request + one retry, no hammering');
+  assert.equal((await limited.evaluate(() => window.__ixOffers)).length, PER_PAGE);
+  block.pages.clear();
+  await limited.addScriptTag({ content: SCRIPT }); // pasted again on the same page → continues from page 2
+  await limited.waitForFunction(() => /Готово: 23/.test(document.querySelector('#ix-collector').textContent), null, { timeout: 30000 });
+  block.profiles = true;
+  block.hits = 0;
+  await limited.click('#ix-collector >> text=Догрузить профили');
+  await limited.waitForFunction(() => /ограничил запросы.*осталось 3/.test(document.querySelector('#ix-collector').textContent), null, { timeout: 30000 });
+  assert.equal(block.hits, 2);
+  block.profiles = false;
+  await limited.click('#ix-collector >> text=/Продолжить профили/');
+  await limited.waitForFunction(() => /Готово:.*Профили работодателей: 3\./.test(document.querySelector('#ix-collector').textContent), null, { timeout: 30000 });
+  assert.ok((await limited.evaluate(() => window.__ixOffers)).every((r) => r.profile));
+  await limited.close();
 
   // 2) Generic single-page app → fallback parser + click mode
   const spa = await collect(`${base}/spa`, '#list .card');
